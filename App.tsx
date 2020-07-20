@@ -1,12 +1,12 @@
 // @flow
-import { StatusBar } from 'expo-status-bar';
+// import { StatusBar } from 'expo-status-bar';
 import React, {useState} from 'react';
-import { FlatList, Alert, Button, StyleSheet, Text, View, Image, Linking, Switch } from 'react-native';
+import { StatusBar, FlatList, Alert, Button, StyleSheet, Text, View, Image, Linking, Switch } from 'react-native';
 import Clipboard from "@react-native-community/clipboard";
-import { BleManager, BleError, State, Device, Characteristic, Service } from 'react-native-ble-plx';
+import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import AndroidOpenSettings from 'react-native-android-open-settings'
 import { ImageSourcePropType } from 'react-native';
-import { base64 } from 'react-native-base64';
+import  base64  from 'react-native-base64';
 import  AsyncStorage  from '@react-native-community/async-storage';
 
 const COPY_UUID  = "4981333e-2d59-43b2-8dc3-8fedee1472c5";
@@ -18,44 +18,57 @@ interface BleDevState {
 	id: string;
 	name: string | null;
 	enabled: boolean;
+	chosenOpacity: number;
 }
 interface BleDevProps {
-	device: Device;
-	manager: BleManager;
-	onUpdate: (clip: string) => void;
+	onUpdate: (clip: string, id: string, name: string | null) => void;
 	key: string;
 }
 class BleDev  extends React.Component<BleDevProps, BleDevState> {
-	hash: ArrayBuffer;
+	hash: string;
 	msg: string;
 	enabled: boolean;
 	writing: boolean;
+	subscription: Subscription | null;
 	msgLength: number;
 	bad: number;
 	state: BleDevState;
 	props: BleDevProps;
 	device: Device;
+	goodStatus: boolean;
+	chosen: boolean;
 	to: Timeout | null;
-	constructor(props: BleDevProps) {
+	constructor(props: BleDevProps, device: Device) {
 		super(props);
-		this.device = props.device
+		this.device = device
 		console.log("Constructing BleDev for: ", this.device.id);
 		this.msg = "";
 		this.msgLength = 0;
 		this.writing = false;
-		this.hash = new ArrayBuffer(0);
+		this.hash = "";
 		this.enabled = false;
 		this.bad = 0;
-		this.state = { name: this.device.name, id: this.device.id, enabled: this.enabled };
+		this.goodStatus = true;
+		this.chosen = false;
+		this.subscription = null;
+		this.state = { name: this.device.name, id: this.device.id, enabled: this.enabled, opacity: 0.0 };
 		this.props = props;
 		// this.state.style = styles.ble_dev;
 	}
 	update() {
+		let opacity;
+		if (this.chosen) {
+			opacity = 1.0
+		} else {
+			opacity = 0.0;
+		}
 		let state = { 
 			name: this.device.name,
 			id: this.device.id,
-			enabled: this.enabled
+			enabled: this.enabled,
+			chosenOpacity: opacity
 		}
+		this.state = state;
 		this.setState(state);
 	}
 	switchCb() {
@@ -71,10 +84,12 @@ class BleDev  extends React.Component<BleDevProps, BleDevState> {
 		console.debug("BleDev.render(): ", this.device.id);
 		return (
 			<View key={this.props.key} style={styles.ble_dev}>
+				<Image source={require("./assets/star.png")}  style={{height: "70%", resizeMode: "center", opacity: this.state.chosenOpacity}}/>
 			    <View>
-					<Text style={{color: "#ffffff"}} >{this.state.name}</Text>
-					<Text style={{color: "#aaaaaa"}} >{this.state.id}</Text>
+					<Text style={{color: "#ffffff", fontSize: 15 }} >{this.state.name}</Text>
+					<Text style={{color: "#b0bec5"}} >{this.state.id}</Text>
 				</View>
+				<Image />
 				<Switch value={this.state.enabled} onValueChange={() => this.switchCb()}/>
 			</View>
 		);
@@ -90,8 +105,9 @@ class BleDev  extends React.Component<BleDevProps, BleDevState> {
 		let dv = new DataView(buf);
 		dv.setUint32(0, this.msg.length, false)
 		dv.setUint32(4, this.msgLength, false);
-		let msg = buf.toString() + this.hash;
-		this.device.writeCharacteristicWithResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("Failed to write to READ_UUID: ", err));
+		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf));
+		let msg = bytes + this.hash;
+		this.device.writeCharacteristicWithResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("writeState(): Failed to write to READ_UUID: ", err));
 		if (this.msg.length !== this.msgLength) {
 			this.to = setTimeout(() => this.writeState(), 1000);
 		}
@@ -115,21 +131,29 @@ class BleDev  extends React.Component<BleDevProps, BleDevState> {
 			this.to = null;
 		}
 	}
-	handleIndication(err: BleError | null, character?: Characteristic | null) {
-		console.debug("handleIndication() not setup");
-		if (err != null) {
-			console.log("Failed to montior Read characteristic: ", err);
-			return;
-		}
-		if (character == null) { return };
+	handleChar(character: Characteristic) {
+		this.goodStatus = true;
 		let data = base64.decode(character.value);
-		let dv = new DataView(data);
+		let buf = new ArrayBuffer(8);
+		let dv = new DataView(buf);
+		for (let i = 0; i < 8; i++) {
+			let code = data.charCodeAt(i);
+			if (code > 255) {
+				throw "Decoded data has character over 255";
+			}
+			dv.setUint8(i, code);
+		}
 		let off = dv.getUint32(0, false);
 		let len = dv.getUint32(4, false);
+		console.debug("handleChar(): off: ", off, ", len: ", len);
 		if (off === 0xFFFFFFFF) {
-			this.msgLength = len;
-			this.hash = data.slice(8,40);
-			this.msg = "";
+			let hash_slice: string = data.slice(8, 40);
+			if (this.msgLength !== len || this.hash !== hash_slice) {
+				console.log("handleChar(): Receiving new hash");
+				this.msgLength = len;
+				this.hash = hash_slice;
+				this.msg = "";
+			}
 		} else {
 			if (off <= this.msg.length) {
 				let diff = this.msg.length - off;
@@ -143,23 +167,49 @@ class BleDev  extends React.Component<BleDevProps, BleDevState> {
 						this.bad = 31;
 					}
 				}
-			}
-			if (this.msgLength === this.msg.length) {
-				this.props.onUpdate(this.msg);
+				if (this.msgLength === this.msg.length) {
+					this.props.onUpdate(this.msg, this.device.id, this.device.name);
+					this.chosen = true;
+					this.writeState();
+				}
+			} else {
 				this.writeState();
 			}
 		}
+
+	}
+	handleIndication(err: BleError | null, character: Characteristic | null) {
+		console.debug("handleIndication()");
+		if (err !== null) {
+			console.log("handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", err);
+			this.disable();
+			this.goodStatus = false;
+			this.update();
+			return;
+		}
+		if (character === null) { return };
+		this.handleChar(character);
 
 	}
 	async enable() {
 		if (this.enabled) {
 			return;
 		}
+		console.log("enable(): enabling: ", this.device.mtu);
 		this.enabled = true;
-		let t_id = this.device.id + "_indicate";
-		this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
+		this.update();
+		this.device = await this.device.discoverAllServicesAndCharacteristics();
+		try {
+			let char = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID);
+			this.handleChar(char);
+		} catch (error) {
+			console.warn("enable(): Failed initial read: ", error);	
+			this.disable();
+			return;
+		}
+		this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
 			this.handleIndication(err, character);
-		}, t_id);
+		});
 		this.writeState();
 	}
 	disable() {
@@ -167,8 +217,12 @@ class BleDev  extends React.Component<BleDevProps, BleDevState> {
 		if (!this.enabled) {
 			return;
 		}
-		let t_id = this.device.id + "_indicate";
-		this.props.manager.cancelTransaction(t_id);
+		this.enabled = false;
+		if (this.subscription !== null) {
+			this.subscription.remove();
+			this.subscription = null;
+		}
+		this.update();
 	}
 	deviceId() {
 		return this.device.id;
@@ -179,6 +233,8 @@ interface SyncerState {
 	sbTitle: string;
 	sbText: string;
 	clipState: string;
+	clipSrc: string;
+	clipTimeStr: string;
 	devices: Array<BleDev>;
 	header_style: object;
 	btn_style: object;
@@ -190,8 +246,10 @@ class Syncer extends React.Component {
 	devices: Array<BleDev>;
 	manager: BleManager;
 	state: SyncerState;
+	clipLocalState: string;
 	clipState: string;
-	fc_to: Timeout | null;
+	clipSrc: string;
+	clipTime: Date;
 	constructor(props) {
 		super(props);
 		console.log("Constructing Syncer");
@@ -200,8 +258,13 @@ class Syncer extends React.Component {
 		this.manager = new BleManager();
 		// this.bleEnabled = false;
 		this.clipState = "";
+		this.clipLocalState = "";
+		this.clipSrc = "";
+		this.clipTime = new Date();
 		this.state = { 
 			clipState: "",
+			clipTimeStr: "",
+			clipSrc: "",
 			sbTitle: "uninit_title",
 			sbIcon: require('./assets/blue_dis.png'),
 			sbText: 'unitint_button',
@@ -209,8 +272,22 @@ class Syncer extends React.Component {
 			devices: [],
 			header_style: styles.enabled_bl
 		};
+		setInterval(() => {
+			this.state.clipTimeStr = this.getTimeStr();
+			this.setState(this.state);
+		}, 1000);
 		this.fetchClip();
+		setInterval(() => this.fetchClip(), 2000);
 		this.manager.state().then((state) => this.getBluetoothDev(state));
+	}
+	getTimeStr(): string {
+		let elapsed  = Math.floor(((new Date()) - this.clipTime) / 1000);
+		let e_min = Math.floor(elapsed / 60)
+		if (e_min > 0) {
+			return e_min + " minutes ago";
+		} else {
+			return elapsed + " seconds ago";
+		}
 	}
 	/*
 	componentDidMount() {
@@ -230,8 +307,11 @@ class Syncer extends React.Component {
 			console.error("Failed to read from clipboard");
 			text = "Error reading clipboard: " + error;
 		}
-		this.clipState = text;
-		this.fc_to = setTimeout(() => { this.fetchClip() }, 1000);
+		if (text !== this.clipLocalState && text !== this.clipState) {
+			this.clipState = text;
+			this.clipLocalState = text;
+			this.clipSrc = "Your device";
+		}
 	}
 	async checkConnDev(device: Device) {
 		console.log("checkConnDev(): " + device.id);
@@ -270,7 +350,7 @@ class Syncer extends React.Component {
 		console.debug("setupConnected(): ", dev.id);
 		let services;
 		try {
-			await dev.discoverAllServicesAndCharacteristics();
+			dev = await dev.discoverAllServicesAndCharacteristics();
 			services = await dev.services();	
 		} catch(error) {
 			console.warn("Failed to discover services for " + dev.id + ": " + error);
@@ -289,19 +369,37 @@ class Syncer extends React.Component {
 		}
 		this.addToPrevConnection(dev.id);
 		let props: BleDevProps = {
-			manager: this.manager,
-			device: dev,
 			key: dev.id + "_syncer",
-			onUpdate: (clip: string) => {
+			onUpdate: (clip: string, id: string, name: string | null) => {
 				this.clipState = clip;
+				if (name === null) {
+					this.clipSrc = id;
+				} else { 
+					this.clipSrc = name;
+				}
+				for (let dev of this.devices) {
+					if (dev.chosen) {
+						dev.chosen = false;
+						break;
+					}
+				}
+				this.clipTime = new Date();
 				this.update(State.PoweredOn);
 			}
 		}
-		devList.push(new BleDev(props));
+		devList.push(new BleDev(props, dev));
 		this.update(State.PoweredOn)
 	}
 	update(bleState: State) {
 		let state: SyncerState = {} as any;
+		state.clipSrc = this.clipSrc;
+		state.clipTimeStr = this.getTimeStr();
+		this.devices = this.devices.filter((dev: BleDev) => {
+			if (!dev.goodStatus) {
+				console.log("Removing device for bad state: ", dev.device.id)
+			}
+			return dev.goodStatus;
+		});
 		state.devices = this.devices;
 		console.debug("update(): devices: ", state.devices);
 		state.clipState = this.clipState;
@@ -364,12 +462,18 @@ class Syncer extends React.Component {
 			}
 		}
 		console.debug("connectPrevious(): ", this.prevDevs);
+		for (let id of this.prevDevs) {
+			console.debug("connectPrevious(): id: ", id);
+			this.manager.connectToDevice(id).then((dev) => this.checkConnDev(dev), (err) => console.log("connectPrevious(): Failed to connect to ", id, ": ", err));
+		}
+		/*
 		this.manager.devices(this.prevDevs).then((devs: Array<Device>) => {
 			console.debug("connectPrevious(): Ble devices:", devs);
 			for (let dev of devs) {
 				this.checkConnDev(dev);	
 			}
 		}, (err) => console.warn("Error: getting previous devices failed: ", err));
+		*/
 		
 	}
 	async getBluetoothDev(newState: State) {
@@ -418,26 +522,54 @@ class Syncer extends React.Component {
 	}
 					//<FlatList data={this.state.devices} renderItem={(data) => data.item}/>
 	render() {
-		console.debug("Syncer.render(): devices:", this.state.devices);
+		console.debug("Syncer.render()");
 		return (
-			<View style={styles.container}>
-				<View>
-					<Text >Clipboard:</Text>
+			<View style={{ justifyContent: "center", flexDirection: "column", height: "100%"}}>
+				<StatusBar backgroundColor={colors.secondaryDarkColor}/>
+				<View style={{ backgroundColor: colors.secondaryDarkColor, flex: 1}}>
+					<Text style={{ color: colors.primaryTextColor, fontSize: 30 }}> {this.state.clipSrc}</Text>
+					<Text style={{ color: "#b0bec5", paddingLeft: 25}}>Synced {this.state.clipTimeStr}</Text>
+				</View>
+				<View style={{ backgroundColor: "#E1E2E1", flex: 2 }}>
 					<Text style={{ paddingLeft: 20 }}>{this.state.clipState}</Text>
 				</View>
-				<View style={this.state.header_style}>
-					<Image source={this.state.sbIcon} style={styles.status_icon}/>
-					<Text>{this.state.sbTitle}</Text>
-					<Button  title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
+				<View style={{ flex: 8 }}>
+					<View style={{ flex: 1, flexDirection: "row", justifyContent: "space-around", backgroundColor: colors.primaryColor, alignItems: "center"}}>
+						<Image source={this.state.sbIcon} style={styles.status_icon}/>
+						<Text style={{ color: colors.primaryTextColor, fontSize: 20 }}>{this.state.sbTitle}</Text>
+						<Button title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
+					</View>
+					<View style={{flex: 7}} >
+						{this.state.devices.map((dev: BleDev) => dev.render())}
+					</View>
 				</View>
-				{this.state.devices.map((dev: BleDev) => dev.render())}
 			</View>
   		);
 	}
 }
+/*
+			
+				*/
+
 
 export default Syncer;
+/*
+type colors_key =  "primaryColor" | "primaryLightColor" | "primaryDarkColor" | "primaryTextColor" 
+	| "secondaryTextColor" | "secondaryColor" | "secondaryTextColor" | "secondaryDarkColor" | "secondaryLightColor";
 
+type MaterialColors = { readonly [K in  colors_key] : string};
+*/
+
+const colors = {
+	primaryColor: "#3f51b5",
+	primaryLightColor: "#757de8",
+	primaryDarkColor: "#002984",
+	secondaryColor: "#25a59a",
+	secondaryLightColor: "#63d7cb",
+	secondaryDarkColor: "#00756c",
+	primaryTextColor: "#ffffff",
+	secondaryTextColor: "#000000",
+}
 const styles = StyleSheet.create({
 	container: {
 		justifyContent: "center",
@@ -468,7 +600,8 @@ const styles = StyleSheet.create({
 		backgroundColor: "#768fff",
 		justifyContent: "space-around",
 		alignItems: "center",
-		flexDirection: "row"
+		flexDirection: "row",
+		height: "10%"
 	},
 	status_icon: {
 		width: 40,
