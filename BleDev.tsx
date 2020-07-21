@@ -4,6 +4,7 @@ import React from 'react';
 import { StatusBar, FlatList, Alert, Button, StyleSheet, Text, View, Image, Linking, Switch } from 'react-native';
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import  base64  from 'react-native-base64';
+import { sha256 } from 'js-sha256';
 
 
 
@@ -11,97 +12,54 @@ export const COPY_UUID  = "4981333e-2d59-43b2-8dc3-8fedee1472c5";
 const READ_UUID  = "07178017-1879-451b-9bb5-3ff13bb85b70";
 const WRITE_UUID = "07178017-1879-451b-9bb5-3ff13bb85b71";
 
-interface BleDevState {
-	id: string;
-	name: string | null;
-	enabled: boolean;
-	chosenOpacity: number;
-}
-export interface BleDevProps {
-	onUpdate: (clip: string, id: string, name: string | null) => void;
-	key: string;
-}
-export class BleDev  extends React.Component<BleDevProps, BleDevState> {
+class InSyncer {
 	hash: string;
 	msg: string;
-	enabled: boolean;
-	writing: boolean;
-	subscription: Subscription | null;
 	msgLength: number;
-	bad: number;
-	state: BleDevState;
-	props: BleDevProps;
+	subscription: Subscription | null;
+	writing: boolean;
 	device: Device;
-	goodStatus: boolean;
-	chosen: boolean;
-	to: Timeout | null;
-	isMount: boolean;
-	constructor(props: BleDevProps, device: Device) {
-		super(props);
-		this.device = device
-		console.log("Constructing BleDev for: ", this.device.id);
+	update_to: Timeout | null;
+	manualReading: boolean;
+	errorState: string | null;
+	onUpdate: (clip: string) => void;
+	constructor(device: Device, onUpdate: (clip: string) => void) {
+		this.onUpdate = onUpdate;
+		this.device = device;
+
+		this.hash = "";
 		this.msg = "";
 		this.msgLength = 0;
+		this.manualReading = false;
 		this.writing = false;
-		this.hash = "";
-		this.enabled = false;
-		this.bad = 0;
-		this.goodStatus = true;
-		this.chosen = false;
+		this.errorState = null;
 		this.subscription = null;
-		this.state = { name: this.device.name, id: this.device.id, enabled: this.enabled, chosenOpacity: 0.0 };
-		this.props = props;
-		this.isMount = false;
-		// this.state.style = styles.ble_dev;
+		this.try_init();
+		// this.write_to = setTimeout(() => this.writeState(), 1000);
 	}
-	componentDidMount() {
-		this.isMount = true;
+	try_init() {
+		this.device.readCharacteristicForService(COPY_UUID, READ_UUID).then((character) => {
+			this.handleChar(character)
+			this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
+				this.handleIndication(err, character);
+			});
+			this.writeState();
+		}, (error) => {
+			this.errorState = error;
+			this.update_to = setTimeout(() => this.try_init(), 1000);
+		});
 	}
-	componentWillUnmount() {
-		this.isMount = false;
-	}
-	update() {
-		if (!this.isMount) {
-			return;
+	close() {
+		if (this.subscription !== null) {
+			this.subscription.remove();
+			this.subscription = null;
 		}
-		let opacity;
-		if (this.chosen) {
-			opacity = 1.0
-		} else {
-			opacity = 0.0;
+		if (this.update_to !== null) {
+			clearTimeout(this.update_to);
+			this.subscription = null;
 		}
-		let state = { 
-			name: this.device.name,
-			id: this.device.id,
-			enabled: this.enabled,
-			chosenOpacity: opacity
-		}
-		this.setState(state);
 	}
-	switchCb() {
-		console.log("buttonCb(): device: ", this.device.id);
-		if (this.enabled) {
-			this.disable()
-		} else {
-			this.enable()
-		}
-		this.update();
-	}
-	render() {
-		console.debug("BleDev.render(): ", this.device.id);
-		return (
-			<View key={this.props.key} style={styles.ble_dev}>
-				<Image source={require("./assets/star.png")}  style={{height: "70%", resizeMode: "center", opacity: this.state.chosenOpacity}}/>
-			    <View>
-					<Text style={{color: "#ffffff", fontSize: 15 }} >{this.state.name}</Text>
-					<Text style={{color: "#b0bec5"}} >{this.state.id}</Text>
-				</View>
-				<Image />
-				<Switch value={this.state.enabled} onValueChange={() => this.switchCb()}/>
-			</View>
-		);
-	}
-	writeState() {
+	async writeState() {
 		console.log("writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
 		if (this.writing) {
 			return;
@@ -114,32 +72,38 @@ export class BleDev  extends React.Component<BleDevProps, BleDevState> {
 		dv.setUint32(4, this.msgLength, false);
 		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf));
 		let msg = bytes + this.hash;
-		this.device.writeCharacteristicWithResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("writeState(): Failed to write to READ_UUID: ", err));
+		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("writeState(): Failed to write to READ_UUID: ", err));
 		if (this.msg.length !== this.msgLength) {
-			this.to = setTimeout(() => this.writeState(), 1000);
+			this.updatePos();
 		}
 		this.writing = false;
 	}
-	reset_to() {
-		if (this.to !== null) {
-			clearTimeout(this.to);
+	updatePos() {
+		if (this.update_to !== null) {
+			clearTimeout(this.update_to);
 		}
-		if (this.msg.length !== this.msgLength) {
-			this.to = setTimeout(() => {
-					this.writeState();
-			});
-		} else {
-			this.to = null;
-		}
+		this.update_to = setTimeout(() => this.readChar(true))
+		this.readChar(true)
 	}
-	clear_to() {
-		if (this.to !== null) {
-			clearTimeout(this.to);
-			this.to = null;
+	async readChar(start: boolean) {
+		if (!(start || this.manualReading)) {
+			return;
 		}
+		this.manualReading = true;
+		let character;
+		try {
+			let character = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID)
+			this.handleChar(character);
+			this.readChar(false);
+		} catch (error) {
+			this.errorState = error;
+			this.update_to = setTimeout(() => this.readChar(false), 1000);
+			this.writeState();
+		}
+
 	}
 	handleChar(character: Characteristic) {
-		this.goodStatus = true;
+		this.errorState = null;
 		let data = base64.decode(character.value);
 		let buf = new ArrayBuffer(8);
 		let dv = new DataView(buf);
@@ -166,73 +130,255 @@ export class BleDev  extends React.Component<BleDevProps, BleDevState> {
 				let diff = this.msg.length - off;
 				if (len === (data.length - 8 - diff)) {
 					this.msg += data.slice(8 + diff * 2);
-					this.reset_to();
 				} else {
-					this.bad -= 1;
-					if (this.bad <= 0) {
-						this.writeState();
-						this.bad = 31;
-					}
 				}
 				if (this.msgLength === this.msg.length) {
-					this.props.onUpdate(this.msg, this.device.id, this.device.name);
-					this.chosen = true;
-					this.writeState();
+					this.onUpdate(this.msg);
 				}
-			} else {
-				this.writeState();
 			}
 		}
-
+		this.writeState();
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {
 		console.debug("handleIndication()");
 		if (err !== null) {
 			console.log("handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", err);
-			this.disable();
-			this.goodStatus = false;
-			this.update();
 			return;
 		}
 		if (character === null) { return };
+		this.manualReading = false;
 		this.handleChar(character);
 
+	}
+
+}
+class OutSyncer {
+	hash: string;
+	msg: string;
+	recvd: number;
+	device: Device;
+		
+	constructor(device: Device) {
+		this.device = device;
+		this.msg = "";
+		this.hash = "";
+		this.recvd = 0;
+		this.push("");
+	}
+	try_init() {
+		// this initial read is needed to determine if we are reading properly
+		this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID).then(() => {
+
+		});
+	}
+	close() {
+
+	}
+	push(clip: string) {
+		this.msg = clip;
+		this.hash = String.fromCharCode.apply(sha256.array(this.msg));
+		this.recvd = 0;
+		// this.hash = CryptJS.sha256(this.msg);
+	}
+
+}
+async function deviceHasCopy(device: Device) {
+	return (await device.services()).find((serv) => (serv.uuid === COPY_UUID)) !== undefined;
+}
+interface BleDevState {
+	name?: string;
+	enabled: boolean;
+	chosenOpacity: number;
+}
+export interface BleDevProps {
+	key: string;
+	name?: string;
+	manager: BleManager;
+	onUpdate: (clip: string, id: string, name?: string) => void;
+}
+
+export class BleDev  extends React.Component<BleDevProps, BleDevState> {
+	enabled: boolean;
+	bad: number;
+	name?: string;
+	chosen: boolean;
+	isMount: boolean;
+	inSyncer: InSyncer | null;
+	outSyncer: OutSyncer | null;
+	device: Device | null;
+	name_sort(right: BleDev) {
+		if (this.name === undefined) {
+			if (right.name === undefined) {
+				return this.props.key.localeCompare(right.props.key);
+			} else {
+				return 1;
+			}
+		} else {
+			if (right.name === undefined) {
+				return -1;
+			} else {
+				let cmp = this.name.localeCompare(right.name);
+				if (cmp !== 0) {
+					return cmp;
+				}
+				return this.props.key.localeCompare(right.props.key);
+			}
+		}
+	}
+	cmp(right: BleDev) {
+		if (this.device === null) {
+			if (right.device === null) {
+				return this.name_sort(right);
+			} else {
+				return 1;
+			}
+		} else {
+			if (right.device === null) {
+				return -1;
+			} else {
+				if (this.enabled) {
+					if (right.enabled) {
+						return this.name_sort(right);
+					} else {
+						return -1;
+					}
+				} else {
+					if (right.enabled) {
+						return 1;
+					} else {
+						return this.name_sort(right);
+					}
+				}
+			}
+		}
+	}
+	constructor(props: BleDevProps) {
+		super(props);
+		console.log("Constructing BleDev for: ", this.props.key);
+		this.enabled = false;
+		this.bad = 0;
+		this.chosen = false;
+		this.state = { name: this.props.name, enabled: this.enabled, chosenOpacity: 0.0 };
+		this.isMount = false;
+		this.device = null;
+		this.inSyncer = null;
+		this.outSyncer = null;
+		// this.state.style = styles.ble_dev;
 	}
 	async enable() {
 		if (this.enabled) {
 			return;
 		}
-		console.log("enable(): enabling: ", this.device.mtu);
 		this.enabled = true;
 		this.update();
-		this.device = await this.device.discoverAllServicesAndCharacteristics();
-		try {
-			let char = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID);
-			this.handleChar(char);
-		} catch (error) {
-			console.warn("enable(): Failed initial read: ", error);	
+		await this.connect();
+		if (this.device === null) {
 			this.disable();
 			return;
+		} else {
+			this.inSyncer = new InSyncer(this.device, (clip) => this.onUpdate(clip));
+			this.outSyncer = new OutSyncer(this.device);
 		}
-		this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
-			this.handleIndication(err, character);
-		});
-		this.writeState();
+	}
+	onUpdate(clip: string) {
+		this.props.onUpdate(clip, this.props.key , this.name)
+	}
+	// Connect to and validates the device.
+	async connect()  {
+		if (this.device === null || !(await this.device.isConnected())) {
+			this.device = await this.props.manager.connectToDevice(this.props.key).catch((error) => {
+				console.log("BleDev.connect(): Failed to connected to ", this.props.key, ": ", error);
+				return null;
+			});
+		}
+		if (this.device !== null && !(await deviceHasCopy(this.device))) {
+			this.device = await this.device.discoverAllServicesAndCharacteristics().then(async (dev) => {
+				if (await deviceHasCopy(dev)) {
+					return dev;
+				} else {
+					console.log("BleDev.connect(): Device ", this.props.key, " doesn't have Copy GATT service.")
+					return null;
+				}
+			}, (error) => {
+				console.log("BleDev.connect(): Failed to discover services of", this.props.key, ": ", error);
+				return null;
+			});
+		}
+		if (this.device !== null && this.device.mtu < 512) {
+			let dev = await this.device.requestMTU(512).catch(() => {
+				console.log("BleDev.connect(): Failed to request MTU of 512 for ", this.props.key);
+				return null;
+			});
+			if (dev === null && this.device.mtu < 244) {
+				this.device = await this.device.requestMTU(244).catch(() => {
+					console.warn("BleDev.connect(): Failed to get required MTU of 244 for ", this.props.key);
+					return null;
+				});
+			}
+		}
+		if (this.device !== null) {
+			if (this.device.name !== null) {
+				this.name = this.device.name;
+			}
+		}
 	}
 	disable() {
-		this.clear_to();
 		if (!this.enabled) {
 			return;
 		}
 		this.enabled = false;
-		if (this.subscription !== null) {
-			this.subscription.remove();
-			this.subscription = null;
+		if (this.inSyncer !== null) {
+			this.inSyncer.close();
+		}
+		if (this.outSyncer !== null) {
+			this.outSyncer.close();
+		}
+	}
+
+	componentDidMount() {
+		this.isMount = true;
+	}
+	componentWillUnmount() {
+		this.isMount = false;
+	}
+	update() {
+		if (!this.isMount) {
+			return;
+		}
+		let opacity;
+		if (this.chosen) {
+			opacity = 1.0
+		} else {
+			opacity = 0.0;
+		}
+		let state = { 
+			name: this.name,
+			enabled: this.enabled,
+			chosenOpacity: opacity
+		}
+		this.setState(state);
+	}
+	switchCb() {
+		console.log("buttonCb(): device: ", this.props.key);
+		if (this.enabled) {
+			this.disable()
+		} else {
+			this.enable()
 		}
 		this.update();
 	}
-	deviceId() {
-		return this.device.id;
+	render() {
+		console.debug("BleDev.render(): ", this.props.key);
+		return (
+			<View key={this.props.key} style={styles.ble_dev}>
+				<Image source={require("./assets/star.png")}  style={{height: "70%", resizeMode: "center", opacity: this.state.chosenOpacity}}/>
+			    <View>
+					<Text style={{color: "#ffffff", fontSize: 15 }} >{this.state.name}</Text>
+					<Text style={{color: "#b0bec5"}} >{this.props.key}</Text>
+				</View>
+				<Switch value={this.state.enabled} onValueChange={() => this.switchCb()}/>
+			</View>
+		);
 	}
 }
 
@@ -274,3 +420,15 @@ const styles = StyleSheet.create({
 		height: 40
 	}
 });
+
+export interface BleDevListProps {
+	children: Array<BleDev>
+}
+export function BleDevList(props: BleDevListProps) {
+	return (
+		<View>
+			{props.children}
+		</View>
+	);
+}
+

@@ -20,24 +20,33 @@ interface SyncerState {
 	clipTimeStr: string;
 	devices: Array<BleDev>;
 	header_style: object;
-	btn_style: object;
 	sbIcon: ImageSourcePropType;
 
 }
-class Syncer extends React.Component {
-	prevDevs: Array<string>;
-	devices: Array<BleDev>;
+interface SyncerProps {
+
+};
+interface PrevDevs {
+	[key: string]: string | null;
+}
+interface CurDevs {
+	[key: string]: BleDev;
+}
+class Syncer extends React.Component<SyncerProps, SyncerState> {
+	prevDevs: PrevDevs | null;
+	devices: CurDevs;
 	manager: BleManager;
-	state: SyncerState;
 	clipLocalState: string;
 	clipState: string;
 	clipSrc: string;
 	clipTime: Date;
-	constructor(props) {
+	isMount: boolean;
+	constructor(props: SyncerProps) {
 		super(props);
 		console.log("Constructing Syncer");
-		this.devices = [];
-		this.prevDevs = [];
+		this.devices = {};
+		this.isMount = false;
+		this.prevDevs = null;
 		this.manager = new BleManager();
 		// this.bleEnabled = false;
 		this.clipState = "";
@@ -51,17 +60,26 @@ class Syncer extends React.Component {
 			sbTitle: "uninit_title",
 			sbIcon: require('./assets/blue_dis.png'),
 			sbText: 'unitint_button',
-			btn_style: styles.enabled_bl,
 			devices: [],
 			header_style: styles.enabled_bl
 		};
 		setInterval(() => {
-			this.state.clipTimeStr = this.getTimeStr();
-			this.setState(this.state);
+			if (!this.isMount) {
+				return;
+			}
+			let state = Object.assign(this.state);
+			state.clipTimeStr = this.getTimeStr();
+			this.setState(state);
 		}, 1000);
 		this.fetchClip();
 		setInterval(() => this.fetchClip(), 2000);
 		this.manager.state().then((state) => this.getBluetoothDev(state));
+	}
+	componentDidMount() {
+		this.isMount = true;
+	}
+	componentWillUnmount() {
+		this.isMount = false;
 	}
 	getTimeStr(): string {
 		let elapsed  = Math.floor(((new Date()) - this.clipTime) / 1000);
@@ -96,118 +114,85 @@ class Syncer extends React.Component {
 			this.clipSrc = "Your device";
 		}
 	}
-	async checkConnDev(device: Device) {
-		console.log("checkConnDev(): " + device.id);
-		const devList = this.devices;
-		if (devList.find((dev: BleDev) => (dev.device.id === device.id)) !== undefined) {
-			console.log("checkConnDev(): device is duplicate, returning...");
-			return;
-		}
-		if (await device.isConnected()) {
-			this.setupConnected(device, devList);
-		} else {
-			console.log("checkConnDev(): Attempting to connect to device: " + device.id);
-			device.connect().then((dev) => this.setupConnected(dev, devList), () => {console.log("Failed to connect to: ", device.id) });
-		}
-	}
-	async addToPrevConnection(id: string) {
+	async writebackPrevDevs(id: string, name?: string) {
 		if (this.prevDevs === null) {
 			console.warn("addToPrevConnection(): this.prevDevs was null");
 			return;
 		}
-		if (this.prevDevs.find((d) => (d === id)) !== undefined) {
-			console.debug("addToPrevConnection(): ", id, " was present in this.prevDevs.");
-			return;
+		if (name === undefined) {
+			this.prevDevs[id] = null;
+		} else {
+			this.prevDevs[id] = name;
 		}
-		try {
-			this.prevDevs.push(id);
-		} catch(error) {
-			console.log("Error pushing to previous device: ", error);
-			this.prevDevs = this.prevDevs.slice();
-			this.prevDevs.push(id);
-		}
-		this.prevDevs.sort()
-		AsyncStorage.setItem(PREV_DEV_STR, this.prevDevs.join(","));
-	}
-	async setupConnected(dev: Device, devList: Array<BleDev>) {
-		console.debug("setupConnected(): ", dev.id);
-		let services;
-		try {
-			dev = await dev.discoverAllServicesAndCharacteristics();
-			services = await dev.services();	
-		} catch(error) {
-			console.warn("Failed to discover services for " + dev.id + ": " + error);
-			return;
-		}
-		try {
-			await dev.requestMTU(244);
-		} catch(error) {
-			console.warn("Failed to get minimum MTU of 244 for " + dev.id);
-		}
-		await dev.requestMTU(512).catch(() => {});
-		let service = services.find((serv) => serv.uuid === COPY_UUID);
-		if (service === undefined) {
-			console.warn("Device " + dev + " does not contain COPY_UUID.");
-			return;
-		}
-		this.addToPrevConnection(dev.id);
-		let props: BleDevProps = {
-			key: dev.id + "_syncer",
-			onUpdate: (clip: string, id: string, name: string | null) => {
-				this.clipState = clip;
-				if (name === null) {
-					this.clipSrc = id;
-				} else { 
-					this.clipSrc = name;
-				}
-				for (let dev of this.devices) {
-					if (dev.chosen) {
-						dev.chosen = false;
-						break;
-					}
-				}
-				this.clipTime = new Date();
-				this.update(State.PoweredOn);
-			}
-		}
-		devList.push(new BleDev(props, dev));
-		this.update(State.PoweredOn)
+		let str = JSON.stringify(this.prevDevs);
+		AsyncStorage.setItem(PREV_DEV_STR, str);
 	}
 	update(bleState: State) {
-		let state: SyncerState = {} as any;
-		state.clipSrc = this.clipSrc;
-		state.clipTimeStr = this.getTimeStr();
-		this.devices = this.devices.filter((dev: BleDev) => {
-			if (!dev.goodStatus) {
-				console.log("Removing device for bad state: ", dev.device.id)
-			}
-			return dev.goodStatus;
-		});
-		state.devices = this.devices;
-		console.debug("update(): devices: ", state.devices);
-		state.clipState = this.clipState;
-		if (bleState= State.PoweredOn) {
-			if (this.devices.length === 0) {
-				state.sbTitle = "Searching...";
-				state.sbText = "Connect";
-				state.sbIcon = require('./assets/blue_search.png');
-				state.header_style = styles.enabled_bl
+		console.debug("update(): devices: ", this.devices);
+		if (!this.isMount) {
+			return;
+		}
+		let sbTitle;
+		let sbText;
+		let sbIcon;
+		let header_style;
+		let devices = Object.values(this.devices);
+		devices.sort((left: BleDev, right: BleDev) => left.cmp(right));
+		if (bleState === State.PoweredOn) {
+			header_style = styles.enabled_bl
+			if (devices.length === 0) {
+				sbTitle = "Searching...";
+				sbText = "Connect";
+				sbIcon = require('./assets/blue_search.png');
 			} else {
-				let device = this.devices[0];
-				state.sbTitle = "Devices:"
+				let device = devices[0];
+				sbTitle = "Devices:"
 				if (device.enabled) {
-					state.sbText = "Disable All";
+					sbText = "Disable All";
 				} else {
-					state.sbText = "Enable All";
+					sbText = "Enable All";
 				}
 			}
 		} else {
-			state.sbTitle = "Bluetooth Disable";
-			state.sbText = "Enable";
-			state.sbIcon = require('./assets/blue_dis.png');
-			state.header_style = styles.disabled
+			sbTitle = "Bluetooth Disable";
+			sbText = "Enable";
+			sbIcon = require('./assets/blue_dis.png');
+			header_style = styles.disabled
 		}
+		
+		let state: SyncerState = {
+			clipState: this.clipState,
+			clipSrc: this.clipSrc,
+			clipTimeStr: this.getTimeStr(),
+			sbTitle: sbTitle,
+			sbText: sbText,
+			sbIcon: sbIcon,
+			devices: devices,
+			header_style: header_style,
+		};
 		this.setState(state);
+	}
+	async tryAddNewDev(dev: Device) {
+		if (this.devices[dev.id] !== undefined) {
+			console.log("tryAddNewDev(): try adding existing devices: ", dev.id)
+			this.devices[dev.id].connect()
+			return;
+		}
+		let props: BleDevProps = {
+			manager: this.manager,
+			key: dev.id,
+			onUpdate: (clip, id, name) => {
+				this.onUpdate(clip, id, name);
+			}
+		};
+		let bleDev = new BleDev(props);
+		await bleDev.connect();
+		if (bleDev.device !== null && this.devices[dev.id] === undefined) {
+			console.log("tryAddNewDev(): Connected to new device: ", dev.id);
+			this.devices[dev.id] = bleDev;
+		} else {
+			console.log("tryAddNewDev(): Failed to connect to device: ", dev.id);
+		}
 	}
 	async startDevScan() {
 		console.log("startDevScan()");
@@ -223,55 +208,60 @@ class Syncer extends React.Component {
 				if (dev == null) {
 					return;
 				}
-				let isConnected = await dev.isConnected();
-				let services: Array<Service> = [];
-				console.log("Scanned: ", dev.name, dev.id, dev.serviceUUIDs);
-				if (isConnected) {
-					services = await dev.services();
-				}
-				console.log("Connected: ", isConnected, " ServiceUUIDs: ", services);
-				this.checkConnDev(dev)
+				console.log("startDevScan.cb() Scanned new device : ", dev.name, dev.id, dev.serviceUUIDs);
+				this.tryAddNewDev(dev);
 		});
 	}
 	async connectPrevious() {
-		if (this.prevDevs.length === 0 ) {
-			let prevDevs: string | null = await AsyncStorage.getItem(PREV_DEV_STR)
+		if (this.prevDevs === null) {
+			let prevDevs: string | null = await AsyncStorage.getItem(PREV_DEV_STR);
 			if (prevDevs === null) {
-				prevDevs = "";
+				prevDevs = "{}";
 			}
-			this.prevDevs = prevDevs.split(',');
-			if (this.prevDevs[0] === "") {
-				this.prevDevs = [];
-			}
+			this.prevDevs = JSON.parse(prevDevs);
 		}
 		console.debug("connectPrevious(): ", this.prevDevs);
-		for (let id of this.prevDevs) {
-			console.debug("connectPrevious(): id: ", id);
-			this.manager.connectToDevice(id).then((dev) => this.checkConnDev(dev), (err) => console.log("connectPrevious(): Failed to connect to ", id, ": ", err));
-		}
-		/*
-		this.manager.devices(this.prevDevs).then((devs: Array<Device>) => {
-			console.debug("connectPrevious(): Ble devices:", devs);
-			for (let dev of devs) {
-				this.checkConnDev(dev);	
+		for (let id in this.prevDevs) {
+			console.debug("connectPrevious(): id: ", id, ", name: ", this.prevDevs[id]);
+			let props: BleDevProps = {
+				key: id,
+				manager: this.manager,
+				onUpdate: (clip, id, name) => {
+					this.onUpdate(clip, id, name);
+				},
+
+			};
+			let dev = new BleDev(props);
+			if (this.devices[id] === undefined) {
+				this.devices[id] = dev;
 			}
-		}, (err) => console.warn("Error: getting previous devices failed: ", err));
-		*/
-		
+			dev.connect();
+		}
+	}
+	onUpdate(clip: string, id: string, name?: string) {
+		this.clipState = clip;
+		if (name === undefined) {
+			this.clipSrc = id;
+		} else {
+			this.clipSrc = name;
+		}
+		this.clipTime = new Date();
 	}
 	async getBluetoothDev(newState: State) {
 		console.log("getBluetoothDev(): " + newState);
 		if (newState === State.PoweredOn) {
 			this.manager.onStateChange((state) => {});
-			this.devices = [];
+			this.devices = {};
 			this.connectPrevious();
 			this.startDevScan();
 			this.manager.connectedDevices([COPY_UUID])
 				.then((devices) => {
 					let ids: Array<string> = devices.map((dev: Device) => { return dev.id; } );
 					console.log("getBluetoothDev(): Checking devices: ", ids);
-					devices.map((dev) => { this.checkConnDev(dev) }
-				)});
+					for (let dev in devices) {
+						this.tryAddNewDev(dev);
+					}
+				});
 		} else {
 			this.manager.onStateChange((state) => this.getBluetoothDev(state));
 		}	
@@ -280,7 +270,7 @@ class Syncer extends React.Component {
 	async sbButtonCb() {
 		console.log("Doing sbButtonCb()");
 		if (await this.manager.state() === State.PoweredOn) {
-			if (this.devices.length === 0) {
+			if (Object.keys(this.devices).length === 0) {
 				// Linking.sendIntent("android.settings.BLUETOOTH_SETTINGS");
 				// Linking.openURL("android.settings.BLUETOOTH_SETTINGS");
 				AndroidOpenSettings.bluetoothSettings();
