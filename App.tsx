@@ -7,7 +7,7 @@ import { BleManager, BleError, State, Device, Characteristic, Service, Subscript
 import AndroidOpenSettings from 'react-native-android-open-settings'
 import { ImageSourcePropType } from 'react-native';
 import  AsyncStorage  from '@react-native-community/async-storage';
-import { BleDev, BleDevProps, COPY_UUID } from './BleDev';
+import { BleDevList, BleDev, COPY_UUID } from './BleDev';
 
 const PREV_DEV_STR = "prevDevs";
 
@@ -41,6 +41,11 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	clipSrc: string;
 	clipTime: Date;
 	isMount: boolean;
+	uiUpdate: () => void;
+	onUpdateCb: (clip: string, id: string, name: string | null) => void;
+	fc_to: any;
+	cl_to: any;
+
 	constructor(props: SyncerProps) {
 		super(props);
 		console.log("Constructing Syncer");
@@ -53,6 +58,10 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.clipLocalState = "";
 		this.clipSrc = "";
 		this.clipTime = new Date();
+		this.uiUpdate = () => this.updateDevice();
+		this.onUpdateCb = (clip: string, id: string, name: string | null) => {
+			this.onUpdate(clip, id, name);
+		};
 		this.state = { 
 			clipState: "",
 			clipTimeStr: "",
@@ -63,7 +72,13 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			devices: [],
 			header_style: styles.enabled_bl
 		};
-		setInterval(() => {
+		this.fc_to = setInterval(() => this.fetchClip(), 2000);
+		this.manager.state().then((state) => this.getBluetoothDev(state));
+	}
+	componentDidMount() {
+		console.log("Syncer.componentDidMount()");
+		this.isMount = true;
+		this.cl_to = setInterval(() => {
 			if (!this.isMount) {
 				return;
 			}
@@ -71,18 +86,27 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			state.clipTimeStr = this.getTimeStr();
 			this.setState(state);
 		}, 1000);
-		this.fetchClip();
-		setInterval(() => this.fetchClip(), 2000);
-		this.manager.state().then((state) => this.getBluetoothDev(state));
-	}
-	componentDidMount() {
-		this.isMount = true;
+
 	}
 	componentWillUnmount() {
+		console.log("Syncer.componentWillUnmount()");
 		this.isMount = false;
+		// clearTimeout(this.fc_to);
+		clearTimeout(this.cl_to);
+		if (this.prevDevs === null) {
+			return;
+		};
+		for (let id in this.devices) {
+			let name = this.devices[id].name;
+			if (name !== null) {
+				this.prevDevs[id] = name;
+			}
+		}
+		let str = JSON.stringify(this.prevDevs);
+		AsyncStorage.setItem(PREV_DEV_STR, str);
 	}
 	getTimeStr(): string {
-		let elapsed  = Math.floor(((new Date()) - this.clipTime) / 1000);
+		let elapsed  = Math.floor(((new Date() as any) - (this.clipTime as any)) / 1000);
 		let e_min = Math.floor(elapsed / 60)
 		if (e_min > 0) {
 			return e_min + " minutes ago";
@@ -103,7 +127,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		let text;
 		try {
 			text = await Clipboard.getString();
-			console.log("read from clipboard: " + text);
+			console.debug("Syncer.fetchClip(): read from clipboard: " + text);
 		} catch(error) {
 			console.error("Failed to read from clipboard");
 			text = "Error reading clipboard: " + error;
@@ -112,20 +136,33 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.clipState = text;
 			this.clipLocalState = text;
 			this.clipSrc = "Your device";
+			for (let id in this.devices) {
+				this.devices[id].push(this.clipState);
+			}
+			this.update(await this.manager.state());
 		}
 	}
-	async writebackPrevDevs(id: string, name?: string) {
+	async writebackPrevDevs(id: string, name: string | null) {
 		if (this.prevDevs === null) {
 			console.warn("addToPrevConnection(): this.prevDevs was null");
 			return;
 		}
-		if (name === undefined) {
-			this.prevDevs[id] = null;
+		if (name === null) {
+			if (this.prevDevs[id] === undefined) {
+				this.prevDevs[id] = null;
+			}
 		} else {
 			this.prevDevs[id] = name;
 		}
 		let str = JSON.stringify(this.prevDevs);
 		AsyncStorage.setItem(PREV_DEV_STR, str);
+	}
+	updateDevice() {
+		let devices = Object.values(this.devices);
+		devices.sort((left: BleDev, right: BleDev) => left.cmp(right));
+		let state = Object.assign(this.state);
+		state.devices = devices;
+		this.setState(state);
 	}
 	update(bleState: State) {
 		console.debug("update(): devices: ", this.devices);
@@ -159,7 +196,6 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			sbIcon = require('./assets/blue_dis.png');
 			header_style = styles.disabled
 		}
-		
 		let state: SyncerState = {
 			clipState: this.clipState,
 			clipSrc: this.clipSrc,
@@ -173,26 +209,24 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.setState(state);
 	}
 	async tryAddNewDev(dev: Device) {
+		console.log("tryAddNewDev(): ", dev.id);
 		if (this.devices[dev.id] !== undefined) {
 			console.log("tryAddNewDev(): try adding existing devices: ", dev.id)
 			this.devices[dev.id].connect()
 			return;
 		}
-		let props: BleDevProps = {
-			manager: this.manager,
-			key: dev.id,
-			onUpdate: (clip, id, name) => {
-				this.onUpdate(clip, id, name);
-			}
-		};
-		let bleDev = new BleDev(props);
+
+		let bleDev = new BleDev(dev.id, dev.name, this.manager, this.uiUpdate, this.onUpdateCb);
 		await bleDev.connect();
+		// recheck this.devices for undefined because of previous await-statement
 		if (bleDev.device !== null && this.devices[dev.id] === undefined) {
 			console.log("tryAddNewDev(): Connected to new device: ", dev.id);
 			this.devices[dev.id] = bleDev;
+			this.update(State.PoweredOn);
 		} else {
 			console.log("tryAddNewDev(): Failed to connect to device: ", dev.id);
 		}
+		console.debug("tryAddNewDev(): this.devices: ", this.devices);
 	}
 	async startDevScan() {
 		console.log("startDevScan()");
@@ -216,36 +250,39 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		if (this.prevDevs === null) {
 			let prevDevs: string | null = await AsyncStorage.getItem(PREV_DEV_STR);
 			if (prevDevs === null) {
-				prevDevs = "{}";
+				console.log("Nothing in storage.");
+				this.prevDevs = {};
+			} else {
+				try {
+					this.prevDevs = JSON.parse(prevDevs);
+				} catch (error) {
+					console.warn("Failed to parse json from storage: ", error);
+					this.prevDevs = {};
+				}
 			}
-			this.prevDevs = JSON.parse(prevDevs);
 		}
 		console.debug("connectPrevious(): ", this.prevDevs);
 		for (let id in this.prevDevs) {
 			console.debug("connectPrevious(): id: ", id, ", name: ", this.prevDevs[id]);
-			let props: BleDevProps = {
-				key: id,
-				manager: this.manager,
-				onUpdate: (clip, id, name) => {
-					this.onUpdate(clip, id, name);
-				},
-
-			};
-			let dev = new BleDev(props);
+			// TODO: move these to the constructor
+			let dev = new BleDev(id, this.prevDevs[id], this.manager, this.uiUpdate, this.onUpdateCb);
 			if (this.devices[id] === undefined) {
 				this.devices[id] = dev;
 			}
 			dev.connect();
 		}
+		this.updateDevice();
 	}
-	onUpdate(clip: string, id: string, name?: string) {
+
+	onUpdate(clip: string, id: string, name: string | null) {
 		this.clipState = clip;
-		if (name === undefined) {
+		if (name === null) {
 			this.clipSrc = id;
 		} else {
 			this.clipSrc = name;
 		}
 		this.clipTime = new Date();
+		this.update(State.PoweredOn);
 	}
 	async getBluetoothDev(newState: State) {
 		console.log("getBluetoothDev(): " + newState);
@@ -258,7 +295,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 				.then((devices) => {
 					let ids: Array<string> = devices.map((dev: Device) => { return dev.id; } );
 					console.log("getBluetoothDev(): Checking devices: ", ids);
-					for (let dev in devices) {
+					for (let dev of devices) {
 						this.tryAddNewDev(dev);
 					}
 				});
@@ -303,7 +340,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 					<Text style={{ color: colors.primaryTextColor, fontSize: 30 }}> {this.state.clipSrc}</Text>
 					<Text style={{ color: "#b0bec5", paddingLeft: 25}}>Synced {this.state.clipTimeStr}</Text>
 				</View>
-				<View style={{ backgroundColor: "#E1E2E1", flex: 2 }}>
+				<View style={{ backgroundColor: "#E0E0E0", flex: 2 }}>
 					<Text style={{ paddingLeft: 20 }}>{this.state.clipState}</Text>
 				</View>
 				<View style={{ flex: 8 }}>
@@ -312,9 +349,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 						<Text style={{ color: colors.primaryTextColor, fontSize: 20 }}>{this.state.sbTitle}</Text>
 						<Button title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
 					</View>
-					<View style={{flex: 7}} >
-						{this.state.devices.map((dev: BleDev) => dev.render())}
-					</View>
+					<BleDevList style={{flex: 7}} children={this.state.devices} />
 				</View>
 			</View>
   		);
@@ -337,9 +372,9 @@ const colors = {
 	primaryColor: "#3f51b5",
 	primaryLightColor: "#757de8",
 	primaryDarkColor: "#002984",
-	secondaryColor: "#25a59a",
-	secondaryLightColor: "#63d7cb",
-	secondaryDarkColor: "#00756c",
+	secondaryColor: "#26a69a",
+	secondaryLightColor: "#64d8cb",
+	secondaryDarkColor: "#00766c",
 	primaryTextColor: "#ffffff",
 	secondaryTextColor: "#000000",
 }

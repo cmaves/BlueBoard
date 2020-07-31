@@ -18,26 +18,32 @@ class InSyncer {
 	msgLength: number;
 	subscription: Subscription | null;
 	writing: boolean;
+	reading: boolean;
 	device: Device;
-	update_to: Timeout | null;
+	update_to: any;
 	manualReading: boolean;
 	errorState: string | null;
 	onUpdate: (clip: string) => void;
+	isClosed: boolean;
+	firstReadComplete: boolean;
 	constructor(device: Device, onUpdate: (clip: string) => void) {
 		this.onUpdate = onUpdate;
 		this.device = device;
-		this.hash = "";
 		this.msg = "";
+		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg))
 		this.msgLength = 0;
 		this.manualReading = false;
 		this.writing = false;
+		this.reading = false;
 		this.errorState = null;
 		this.subscription = null;
+		this.isClosed = false;
+		this.firstReadComplete = false;
 		this.try_init();
 		// this.write_to = setTimeout(() => this.writeState(), 1000);
 	}
 	try_init() {
-		console.log("try_init()");
+		console.log("Insyncer.try_init()");
 		this.device.readCharacteristicForService(COPY_UUID, READ_UUID).then((character) => {
 			this.handleChar(character)
 			this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
@@ -45,67 +51,84 @@ class InSyncer {
 			});
 			this.writeState();
 		}, (error) => {
-			console.warn("tryInit(): Failed to read charactersitic: ", error);
+			console.warn("Insyncer.tryInit(): Failed to read charactersitic: ", error);
 			this.errorState = error;
 			this.update_to = setTimeout(() => this.try_init(), 1000);
 		});
 	}
 	close() {
+		this.isClosed = true;
 		if (this.subscription !== null) {
 			this.subscription.remove();
 			this.subscription = null;
 		}
-		if (this.update_to !== null) {
-			clearTimeout(this.update_to);
-			this.subscription = null;
-		}
+		clearTimeout(this.update_to);
 	}
 	async writeState() {
-		console.log("InSyncer.writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
-		if (this.writing) {
+		if (this.writing || this.isClosed) {
 			return;
 		}
+		console.log("InSyncer.writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
 		this.writing = true;
 		// TODO: impelment message sending
 		let buf = new ArrayBuffer(8);
 		let dv = new DataView(buf);
 		dv.setUint32(0, this.msg.length, false)
 		dv.setUint32(4, this.msgLength, false);
-		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf));
+		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf) as any);
 		let msg = bytes + this.hash;
-		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("writeState(): Failed to write to READ_UUID: ", err));
-		if (this.msg.length !== this.msgLength) {
-			this.updatePos();
-		}
+		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("Insyncer.writeState(): Failed to write to READ_UUID: ", err));
+		this.updatePos()
 		this.writing = false;
 	}
+	
+
+	/*
+	 	Setups up a timeout for reading a 
+	 */
 	updatePos() {
-		if (this.update_to !== null) {
-			clearTimeout(this.update_to);
+		clearTimeout(this.update_to);
+		if (this.msgLength > this.msg.length) {
+			this.update_to = setTimeout(() => {
+				this.manualReading = true;
+				this.readChar()
+			}, 1000);
+		} else {
+			this.update_to = setTimeout(() => {
+				this.readChar();
+			}, 2000);
 		}
-		this.update_to = setTimeout(() => this.readChar(true))
-		this.readChar(true)
 	}
-	async readChar(start: boolean) {
-		if (!(start || this.manualReading)) {
+	async readChar() {
+		if (this.isClosed) {
 			return;
 		}
-		this.manualReading = true;
-		let character;
+		this.reading = true;
+		console.debug("InSyncer.readChar()");
 		try {
 			let character = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID)
 			this.handleChar(character);
-			this.readChar(false);
+			if (this.manualReading) {
+				this.readChar();
+			}
 		} catch (error) {
+			// retry read in a second 
+			console.log("InSyncer.readChar(): failed to readChar: ", error);
 			this.errorState = error;
-			this.update_to = setTimeout(() => this.readChar(false), 1000);
+			this.update_to = setTimeout(() => this.readChar(), 1000);
 			this.writeState();
 		}
-
+		this.reading = false;
+		
 	}
 	handleChar(character: Characteristic) {
 		this.errorState = null;
 		let data = base64.decode(character.value);
+		if (data.length < 8) {
+			console.log("Insyncer.handleChar(): too short of message was received");
+			this.writeState();
+			return;
+		}
 		let buf = new ArrayBuffer(8);
 		let dv = new DataView(buf);
 		for (let i = 0; i < 8; i++) {
@@ -117,11 +140,11 @@ class InSyncer {
 		}
 		let off = dv.getUint32(0, false);
 		let len = dv.getUint32(4, false);
-		console.debug("handleChar(): off: ", off, ", len: ", len);
+		console.debug("InSyncer.handleChar(): off: ", off, ", len: ", len);
 		if (off === 0xFFFFFFFF) {
 			let hash_slice: string = data.slice(8, 40);
 			if (this.msgLength !== len || this.hash !== hash_slice) {
-				console.log("handleChar(): Receiving new hash");
+				console.log("InSyncer.handleChar(): Receiving new hash");
 				this.msgLength = len;
 				this.hash = hash_slice;
 				this.msg = "";
@@ -134,24 +157,31 @@ class InSyncer {
 				} else {
 				}
 				if (this.msgLength === this.msg.length) {
-					this.onUpdate(this.msg);
+					this.manualReading = false; // we are done reading so stop the rapid reads.
+					if (this.msgLength !== off) {
+						// only update the value once, not on periodic updates from readChar().
+						if (this.firstReadComplete) {
+							this.onUpdate(this.msg);
+						} else {
+							this.firstReadComplete = true;
+						}
+					}
 				}
 			}
 		}
 		this.writeState();
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {
-		console.debug("handleIndication()");
+		console.debug("InSyncer.handleIndication()");
 		if (err !== null) {
-			console.log("handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", err);
+			console.log("InSyncer.handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", err);
 			return;
 		}
 		if (character === null) { return };
 		this.manualReading = false;
+		clearTimeout(this.update_to);
 		this.handleChar(character);
-
 	}
-
 }
 class OutSyncer {
 	hash: string;
@@ -159,65 +189,122 @@ class OutSyncer {
 	recvd: number;
 	written: number;
 	device: Device;
-	write_to: Timeout | null;
+	subscription: Subscription | null;
+	manualReading: boolean;
+	update_to: any;
+	errorState: string | null;
+	writing: boolean;
+	isClosed: boolean;
 		
 	constructor(device: Device) {
 		this.device = device;
 		this.msg = "";
 		this.hash = "";
-		this.recvd = 0;
+		this.recvd = 0xFFFFFFFF;
+		this.written = 0;
+		this.manualReading = false;
+		this.isClosed = false;
+		this.errorState = null;
+		this.subscription = null;
+		this.writing = false;
 		this.push("");
 	}
 	try_init() {
 		// this initial read is needed to determine if we are reading properly
-		this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID).then(() => {
-
+		this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID).then((character) => {
+			this.handleChar(character);
+			this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, WRITE_UUID, (err, character) => {
+				this.handleIndication(err, character);
+			});
+		}, (err) => {
+			console.warn("OutSyncer.tryInit(): Failed to read charactersitic: ", err);
+			this.errorState = err;
+			this.update_to = setTimeout(() => this.try_init(), 1000);
 		});
 	}
 	close() {
-
+		this.isClosed = true;
+		if (this.subscription !== null) {
+			this.subscription.remove();
+			this.subscription = null;
+		}
+		if (this.update_to !== null) {
+			clearTimeout(this.update_to);
+			this.subscription = null;
+		}
 	}
 	push(clip: string) {
 		this.msg = clip;
-		this.recvd = 0;
+		this.recvd = 0xFFFFFFFF;
 		this.written = 0;
 		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg));
 		this.writeNext();
 		
 	}
 	async writeNext() {
+		if (this.writing || this.isClosed) {
+			return;
+		}
+		this.writing = true;
+		console.debug("OutSyncer.writeNext(): this.recvd:", this.recvd, ", this.written: ", this.written, "/", this.msg.length);
 		let buf = new ArrayBuffer(8);
 		let dv = new DataView(buf);
 		if (this.recvd === 0xFFFFFFFF) {
-			dv.setUint32(0, this.written, false);
+			dv.setUint32(0, 0xFFFFFFFF, false);
 			dv.setUint32(4, this.msg.length, false);
-			let msg = String.fromCharCode.apply(null, buf) + this.hash;
-			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((error) =>	
+			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.hash;
+			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, base64.encode(msg)).catch((error) =>	
 					console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
 			this.written = 0;
-			this.startWriteTo();
+			this.startUpdateTo();
+			this.writing = false;
 			return;	
 		}
+		let target;
 		const MAX_OUT = this.device.mtu * 8;
-		let target = Math.min(this.msg.length, (this.recvd + MAX_OUT));
+		if (this.device.mtu !== null) {
+			target = Math.min(this.msg.length, (this.recvd + MAX_OUT));
+		} else {
+			target = Math.min(this.msg.length, 244 * 8);
+		}
 		while (this.written < target) {
 			let end = Math.min(target, (this.written + 512 - 8));
 			dv.setUint32(0, this.written, false);
 			let len = end - this.written;
 			dv.setUint32(4, len, false);
-			let msg = String.fromCharCode.apply(null, buf) + this.msg.slice(this.written, end);
-			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((error) =>
-				console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
-			this.startWriteTo();
-			
+			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.msg.slice(this.written, end);
+			await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, base64.encode(msg)).catch((error) => console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
+			this.written = end;
 		}
+		if (this.recvd !== this.msg.length) {
+			this.startUpdateTo();
+		} else {
+			this.manualReading = false;
+		}
+		this.writing = false;
 	}
-	handleIndication() {
-		
+	async readUpdate() {
+		if (this.isClosed) {
+			return;
+		}
+		console.debug("OutSyncer.readUpdate()");
+		try {
+			let character = await this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID);
+			this.handleChar(character);
+			if (this.manualReading) {
+				this.readUpdate();
+			}
+		} catch (error) {
+			// retry read in a second 
+			console.log("OutSyncer.readUpdate(): failed to read: ", error);
+			this.update_to = setTimeout(() => this.readUpdate(), 1000);
+			this.errorState = error;
+
+		}
 	}
 	handleChar(character: Characteristic) {
 		let data = base64.decode(character.value);
-		if (data.length == 40) {
+		if (data.length < 40) {
 			console.warn("OutSyncer.handleChar(): received message that was too short.");	
 		}
 		let buf = new ArrayBuffer(8);
@@ -240,15 +327,21 @@ class OutSyncer {
 		this.recvd = curPos;
 		this.writeNext();
 	}
-	clearWriteTo() {
-		if (this.write_to !== null) {
-			clearTimeout(this.write_to);
+	handleIndication(err: BleError | null, character: Characteristic | null) {
+		console.debug("OutSyncer.handleIndication()");
+		if (err !== null) {
+			console.log("OutSyncer.handleIndication(): Failed to monitior write characteristic of ", this.device.id, ": ", err);
+			return;
 		}
+		if (character === null) { return; }
+		this.manualReading = false;
+		clearTimeout(this.update_to);
 	}
-	startWriteTo() {
-		this.clearWriteTo();
-		this.write_to = setTimeout(() => {
-			this.writeNext();
+	startUpdateTo() {
+		clearTimeout(this.update_to);
+		this.update_to = setTimeout(() => {
+			this.manualReading = true;
+			this.readUpdate();
 		}, 1000);
 
 	}
@@ -275,6 +368,7 @@ export class BleDev {
 	outSyncer: OutSyncer | null;
 	uiTrigger: () => void;
 	device: Device | null;
+
 	constructor(id: string, name: string | null, manager: BleManager, uiTrigger: () => void,  onUpdate: (clip: string, id: string, name: string | null) => void)
  	{
 		this.id = id;
@@ -434,7 +528,11 @@ export class BleDev {
 			}
 		}
 	}
-
+	push(clip: string) {
+		if (this.outSyncer !== null) {
+			this.outSyncer.push(clip);
+		}
+	}
 }
 
 const styles = StyleSheet.create({
