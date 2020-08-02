@@ -44,14 +44,22 @@ class InSyncer {
 	}
 	try_init() {
 		console.log("Insyncer.try_init()");
-		this.device.readCharacteristicForService(COPY_UUID, READ_UUID).then((character) => {
-			this.handleChar(character)
-			this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
-				this.handleIndication(err, character);
+		this.device.discoverAllServicesAndCharacteristics().then((device) => {
+			this.device = device;
+			this.device.readCharacteristicForService(COPY_UUID, READ_UUID).then((character) => {
+				this.handleChar(character);
+				this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
+					this.handleIndication(err, character);
+				});
+				this.writeState();
+			}, (error) => {
+				let err_str = JSON.stringify(error);
+				console.warn("Insyncer.tryInit(): Failed to read charactersitic: ", err_str);
+				this.errorState = error;
+				this.update_to = setTimeout(() => this.try_init(), 1000);
 			});
-			this.writeState();
 		}, (error) => {
-			console.warn("Insyncer.tryInit(): Failed to read charactersitic: ", error);
+			console.warn("Insyncer.tryInit(): Failed to discover charactersitic: ", error);
 			this.errorState = error;
 			this.update_to = setTimeout(() => this.try_init(), 1000);
 		});
@@ -174,7 +182,8 @@ class InSyncer {
 	handleIndication(err: BleError | null, character: Characteristic | null) {
 		console.debug("InSyncer.handleIndication()");
 		if (err !== null) {
-			console.log("InSyncer.handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", err);
+			let j_err = JSON.stringify(err);
+			console.log("InSyncer.handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", j_err);
 			return;
 		}
 		if (character === null) { return };
@@ -368,6 +377,7 @@ export class BleDev {
 	outSyncer: OutSyncer | null;
 	uiTrigger: () => void;
 	device: Device | null;
+	conn_to: any;
 
 	constructor(id: string, name: string | null, manager: BleManager, uiTrigger: () => void,  onUpdate: (clip: string, id: string, name: string | null) => void)
  	{
@@ -386,18 +396,33 @@ export class BleDev {
 		// this.state.style = styles.ble_dev;
 	}
 	async enable() {
-		if (this.enabled) {
-			return;
-		}
+		console.log("BleDev.enable()");
 		this.enabled = true;
 		this.uiTrigger();
 		await this.connect();
 		if (this.device === null) {
-			this.disable();
-		} else if (this.enabled) {
+			clearTimeout(this.conn_to);
+			this.conn_to = setTimeout(() => this.enable(), 5000);
+		} else {
 			// above if check to device is still enabled after await
 			this.inSyncer = new InSyncer(this.device, (clip) => this.onUpdate(clip));
 			this.outSyncer = new OutSyncer(this.device);
+		}
+		this.uiTrigger();
+	}
+	disable() {
+		this.enabled = false;
+		this.close()
+	}
+
+	// BleDEV is still valid after close()
+	close() {
+		clearTimeout(this.conn_to)
+		if (this.inSyncer !== null) {
+			this.inSyncer.close();
+		}
+		if (this.outSyncer !== null) {
+			this.outSyncer.close();
 		}
 		this.uiTrigger();
 	}
@@ -407,8 +432,15 @@ export class BleDev {
 	// Connect to and validates the device.
 	async connect()  {
 		console.log("BleDev.connect(): called for: ", this.id);
+		this.device = await this.manager.devices([this.id]).then((devs) => {
+			if (devs.length > 0) {
+				return devs[0];
+			} else {
+				return null;
+			}
+		});
 		if (this.device === null || !(await this.device.isConnected())) {
-			this.device = await this.manager.connectToDevice(this.id).catch((error) => {
+			this.device = await this.manager.connectToDevice(this.id, { refreshGatt: "OnConnected" }).catch((error) => {
 				console.log("BleDev.connect(): Failed to connected to ", this.id, ": ", error);
 				return null;
 			});
@@ -442,20 +474,14 @@ export class BleDev {
 			if (this.device.name !== null) {
 				this.name = this.device.name;
 			}
+			this.device.onDisconnected((err, dev) => {
+				this.device = null;
+				this.close();
+				if (this.enabled) {
+					this.conn_to = setTimeout(() => this.enable(), 5000);
+				}
+			});
 		}
-	}
-	disable() {
-		if (!this.enabled) {
-			return;
-		}
-		this.enabled = false;
-		if (this.inSyncer !== null) {
-			this.inSyncer.close();
-		}
-		if (this.outSyncer !== null) {
-			this.outSyncer.close();
-		}
-		this.uiTrigger();
 	}
 	switchCb() {
 		console.log("buttonCb(): device: ", this.id);
@@ -562,14 +588,14 @@ const styles = StyleSheet.create({
 		height: 60,
 	},
 	ble_dev_con: {
-		backgroundColor: "#768fff",
+		backgroundColor: "#757de8",
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",
 		height: "10%"
 	},
 	ble_dev_dis: {
-		backgroundColor: "#555555",
+		backgroundColor: "#727272",
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",

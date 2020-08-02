@@ -26,8 +26,12 @@ interface SyncerState {
 interface SyncerProps {
 
 };
+interface PrevDev {
+	enabled: boolean;
+	name: string | null;
+};
 interface PrevDevs {
-	[key: string]: string | null;
+	[key: string]: PrevDev;
 }
 interface CurDevs {
 	[key: string]: BleDev;
@@ -96,10 +100,20 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		if (this.prevDevs === null) {
 			return;
 		};
+		// update json
 		for (let id in this.devices) {
 			let name = this.devices[id].name;
-			if (name !== null) {
-				this.prevDevs[id] = name;
+			let enabled = this.devices[id].enabled;
+			if (this.prevDevs[id] === undefined) {
+				if (enabled) { 
+					this.prevDevs[id] = { name: name, enabled: enabled };
+				}
+			} else {
+				if (name === null) {
+					this.prevDevs[id].enabled = enabled;
+				} else {
+					this.prevDevs[id] = { name: name, enabled: enabled };
+				}
 			}
 		}
 		let str = JSON.stringify(this.prevDevs);
@@ -142,17 +156,17 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.update(await this.manager.state());
 		}
 	}
-	async writebackPrevDevs(id: string, name: string | null) {
+	async writebackPrevDevs(id: string, name: string | null, enabled: true) {
 		if (this.prevDevs === null) {
 			console.warn("addToPrevConnection(): this.prevDevs was null");
 			return;
 		}
 		if (name === null) {
 			if (this.prevDevs[id] === undefined) {
-				this.prevDevs[id] = null;
+				this.prevDevs[id] = { name: null, enabled: enabled };
 			}
 		} else {
-			this.prevDevs[id] = name;
+			this.prevDevs[id] = { name: name, enabled: enabled };
 		}
 		let str = JSON.stringify(this.prevDevs);
 		AsyncStorage.setItem(PREV_DEV_STR, str);
@@ -263,13 +277,20 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		}
 		console.debug("connectPrevious(): ", this.prevDevs);
 		for (let id in this.prevDevs) {
-			console.debug("connectPrevious(): id: ", id, ", name: ", this.prevDevs[id]);
+			let name = this.prevDevs[id].name;
+			let enabled = this.prevDevs[id].enabled;
+			console.debug("connectPrevious(): id: ", id, ", name: ", name, ", enabled: ", enabled);
 			// TODO: move these to the constructor
-			let dev = new BleDev(id, this.prevDevs[id], this.manager, this.uiUpdate, this.onUpdateCb);
+			let dev: BleDev;
 			if (this.devices[id] === undefined) {
+				dev = new BleDev(id, name, this.manager, this.uiUpdate, this.onUpdateCb);
 				this.devices[id] = dev;
+			} else {
+				dev = this.devices[id];
 			}
-			dev.connect();
+			dev.connect().then(() => {
+				if (enabled) { dev.enable() }
+			});
 		}
 		this.updateDevice();
 	}
@@ -282,6 +303,12 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.clipSrc = name;
 		}
 		this.clipTime = new Date();
+		Clipboard.setString(clip);
+		for (let idI in this.devices) {
+			if (idI !== id) {
+				this.devices[idI].push(this.clipState);
+			}
+		}
 		this.update(State.PoweredOn);
 	}
 	async getBluetoothDev(newState: State) {
@@ -349,7 +376,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 						<Text style={{ color: colors.primaryTextColor, fontSize: 20 }}>{this.state.sbTitle}</Text>
 						<Button title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
 					</View>
-					<BleDevList style={{flex: 7}} children={this.state.devices} />
+					<BleDevList style={{flex: 7, backgroundColor: "#555555" }} children={this.state.devices} />
 				</View>
 			</View>
   		);
