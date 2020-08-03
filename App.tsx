@@ -1,7 +1,7 @@
 // @flow
 // import { StatusBar } from 'expo-status-bar';
 import React from 'react';
-import { StatusBar, FlatList, Alert, Button, StyleSheet, Text, View, Image, Linking, Switch } from 'react-native';
+import { Animated, Platform, StatusBar, ScrollView, Button, StyleSheet, Text, View, Image, Switch, Pressable } from 'react-native';
 import Clipboard from "@react-native-community/clipboard";
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import AndroidOpenSettings from 'react-native-android-open-settings'
@@ -10,7 +10,6 @@ import  AsyncStorage  from '@react-native-community/async-storage';
 import { BleDevList, BleDev, COPY_UUID } from './BleDev';
 import {check, request, PERMISSIONS, RESULTS} from 'react-native-permissions';
 const PREV_DEV_STR = "prevDevs";
-
 
 interface SyncerState {
 	sbTitle: string;
@@ -21,6 +20,10 @@ interface SyncerState {
 	devices: Array<BleDev>;
 	header_style: object;
 	sbIcon: ImageSourcePropType;
+	rotation: Animated.Value;
+	clip_flex: Animated.Value;
+	list_flex: Animated.Value;
+	dev_sec_flex: Animated.Value;
 
 }
 interface SyncerProps {
@@ -49,12 +52,15 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	onUpdateCb: (clip: string, id: string, name: string | null) => void;
 	fc_to: any;
 	cl_to: any;
+	do_to: any;
+	showing_devs: boolean;
 
 	constructor(props: SyncerProps) {
 		super(props);
 		console.log("Constructing Syncer");
 		this.devices = {};
 		this.isMount = false;
+		this.showing_devs = true;
 		this.prevDevs = null;
 		this.manager = new BleManager();
 		// this.bleEnabled = false;
@@ -74,7 +80,11 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			sbIcon: require('./assets/blue_dis.png'),
 			sbText: 'unitint_button',
 			devices: [],
-			header_style: styles.enabled_bl
+			header_style: styles.enabled_bl,
+			rotation: new Animated.Value(0),
+			clip_flex: new Animated.Value(3),
+			list_flex: new Animated.Value(7),
+			dev_sec_flex: new Animated.Value(8),
 		};
 		this.fc_to = setInterval(() => this.fetchClip(), 2000);
 		this.manager.state().then((state) => this.getBluetoothDev(state));
@@ -116,6 +126,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.isMount = false;
 		// clearTimeout(this.fc_to);
 		clearTimeout(this.cl_to);
+		clearTimeout(this.do_to);
 		if (this.prevDevs === null) {
 			return;
 		};
@@ -191,11 +202,21 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		AsyncStorage.setItem(PREV_DEV_STR, str);
 	}
 	updateDevice() {
+		this.manager.state().then((state) => this.update(state));
+		/*
 		let devices = Object.values(this.devices);
 		devices.sort((left: BleDev, right: BleDev) => left.cmp(right));
 		let state = Object.assign(this.state);
 		state.devices = devices;
+		let count = 0;
+		for (let dev of devices) {
+			if (dev.device !== null && dev.enabled) {
+				count += 1;
+			}
+		}
+		this.sbTitle = count 
 		this.setState(state);
+		*/
 	}
 	update(bleState: State) {
 		console.debug("update(): devices: ", this.devices);
@@ -215,8 +236,17 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 				sbText = "Connect";
 				sbIcon = require('./assets/blue_search.png');
 			} else {
+				let count = 0;
+				for (let dev of devices) {
+					if (dev.device !== null && dev.enabled) {
+						count += 1;
+					}
+				}
 				let device = devices[0];
-				sbTitle = "Devices:"
+				sbTitle = count + " Active Device";
+				if (count > 1) {
+					sbTitle += "s";
+				}
 				if (device.enabled) {
 					sbText = "Disable All";
 				} else {
@@ -224,7 +254,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 				}
 			}
 		} else {
-			sbTitle = "Bluetooth Disable";
+			sbTitle = "Bluetooth Disabled";
 			sbText = "Enable";
 			sbIcon = require('./assets/blue_dis.png');
 			header_style = styles.disabled
@@ -238,6 +268,10 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			sbIcon: sbIcon,
 			devices: devices,
 			header_style: header_style,
+			dev_sec_flex: this.state.dev_sec_flex,
+			list_flex: this.state.list_flex,
+			clip_flex: this.state.clip_flex,
+			rotation: this.state.rotation,
 		};
 		this.setState(state);
 	}
@@ -376,7 +410,6 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.manager.enable();
 		}
 	}
-					//<FlatList data={this.state.devices} renderItem={(data) => data.item}/>
 	render() {
 		console.debug("Syncer.render()");
 		return (
@@ -386,26 +419,73 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 					<Text style={{ color: colors.primaryTextColor, fontSize: 30 }}> {this.state.clipSrc}</Text>
 					<Text style={{ color: "#b0bec5", paddingLeft: 25}}>Synced {this.state.clipTimeStr}</Text>
 				</View>
-				<View style={{ backgroundColor: "#E0E0E0", flex: 2 }}>
-					<Text style={{ paddingLeft: 20 }}>{this.state.clipState}</Text>
-				</View>
-				<View style={{ flex: 8 }}>
-					<View style={{ flex: 1, flexDirection: "row", justifyContent: "space-around", backgroundColor: colors.primaryColor, alignItems: "center"}}>
+				<Animated.View style={{ backgroundColor: "#E0E0E0", flex: this.state.clip_flex }}>
+					<ScrollView><Text style={{ paddingLeft: 20 }}>{this.state.clipState}</Text></ScrollView>
+					<Pressable onPress={() => this.dropdown()} style={({pressed}) => { 
+						let op = pressed ? 1.0 : 0.8;
+						let bc = pressed ? "#3f51b522" : "#3f51b500";
+						return { backgroundColor: bc, opacity: op, position: "absolute", bottom: "1%", right: "1%", width: "15%", aspectRatio: 1, borderRadius: 60, justifyContent: "center", alignItems: "center" };
+					}}>
+						<Animated.Image style={
+							{height: "50%", width: "50%", transform: 
+								[{ rotate: this.state.rotation.interpolate(
+									{inputRange: [0, 1], outputRange: ["0deg", "180deg"] }
+								)}] 
+							}} source={down_arrow} />
+					</Pressable>
+				</Animated.View>
+				<Animated.View style={{ flex: this.state.dev_sec_flex }}>
+					<View style={{ flex: 1, flexShrink: 0, flexDirection: "row", justifyContent: "space-around", backgroundColor: colors.primaryColor, alignItems: "center"}}>
 						<Image source={this.state.sbIcon} style={styles.status_icon}/>
 						<Text style={{ color: colors.primaryTextColor, fontSize: 20 }}>{this.state.sbTitle}</Text>
 						<Button title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
 					</View>
-					<BleDevList style={{flex: 7, backgroundColor: "#555555" }} children={this.state.devices} />
-				</View>
+					<BleDevList style={
+						{height: 0, overflow: "hidden", flex: this.state.list_flex , backgroundColor: "#555555" }} 
+						children={this.state.devices} />
+				</Animated.View>
 			</View>
   		);
 	}
+	dropdown() {
+		this.showing_devs = !this.showing_devs;
+		let state = Object.assign(this.state);
+		let dropdown;
+		let rotation;
+		if (this.showing_devs) {
+			dropdown = 0;
+			rotation = 0;
+		} else {
+			dropdown = 7;
+			rotation = 1;
+		}
+		Animated.parallel([
+			Animated.timing(this.state.rotation, 
+				{ duration: 350, toValue: dropdown, useNativeDriver: true }),
+			Animated.timing(this.state.clip_flex, 
+				{ duration: 350, toValue: 3 + dropdown, useNativeDriver: false }),
+			Animated.timing(this.state.dev_sec_flex, 
+				{ duration: 350, toValue: 8 - dropdown, useNativeDriver: false }),
+			Animated.timing(this.state.list_flex, 
+				{ duration: 350, toValue: 7 - dropdown, useNativeDriver: false }),
+		]).start();
+		/*
+		LayoutAnimation.create(250, LayoutAnimation.Types.linear, LayoutAnimation.PoweredOn
+		LayoutAnimation.linear();*/
+		/*
+		this.do_to = setInterval(() => {
+			let state = Object.assign(this.state);
+			state.dropdown = state.dropdown + (this.showing_devs ? -0.5 : 0.5);
+			state.rotation = state.rotation + (this.showing_devs ? -9 : 9);
+			this.setState(state);
+			if (this.state.rotation === (180 * ((!this.showing_devs) as any))) {
+				clearTimeout(this.do_to);
+			}
+		}, 1);
+		*/
+	}
 }
-/*
-			
-				*/
-
-
+const down_arrow = require("./assets/down_arrow.png");
 export default Syncer;
 /*
 type colors_key =  "primaryColor" | "primaryLightColor" | "primaryDarkColor" | "primaryTextColor" 

@@ -1,7 +1,7 @@
 
 
 import React from 'react';
-import {  StyleSheet, Text, View, Image, Linking, Switch, StyleProp, ViewStyle } from 'react-native';
+import { Animated, StyleSheet, Text, View, Image, FlatList, Switch, StyleProp, ViewStyle } from 'react-native';
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import  base64  from 'react-native-base64';
 import { sha256 } from 'js-sha256';
@@ -482,6 +482,7 @@ export class BleDev {
 				}
 			});
 		}
+		this.uiTrigger();
 	}
 	switchCb() {
 		console.log("buttonCb(): device: ", this.id);
@@ -592,14 +593,14 @@ const styles = StyleSheet.create({
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",
-		height: "10%"
+		height: "100%"
 	},
 	ble_dev_dis: {
 		backgroundColor: "#727272",
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",
-		height: "10%"
+		height: "100%"
 	},
 	status_icon: {
 		width: 40,
@@ -648,9 +649,9 @@ export function BleDevView(props: BleDevProps) {
 }
 export function BleDevList(props: BleDevListProps) {
 	return (
-		<View style={props.style} >
-			{props.children.map((child) => child.getUIElement())}
-		</View>
+		<Animated.View style={props.style} >
+			<FlatList contentContainerStyle={{height: "11%"}} data={props.children} renderItem={({item}) => item.getUIElement()}/>
+		</Animated.View>
 	);
 }
 
