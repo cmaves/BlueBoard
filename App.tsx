@@ -8,7 +8,7 @@ import AndroidOpenSettings from 'react-native-android-open-settings'
 import { ImageSourcePropType } from 'react-native';
 import  AsyncStorage  from '@react-native-community/async-storage';
 import { BleDevList, BleDev, COPY_UUID } from './BleDev';
-
+import {check, request, PERMISSIONS, RESULTS} from 'react-native-permissions';
 const PREV_DEV_STR = "prevDevs";
 
 
@@ -81,6 +81,25 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	}
 	componentDidMount() {
 		console.log("Syncer.componentDidMount()");
+		check(PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION).then(async (result) => {
+			switch (result) {
+				case RESULTS.DENIED:
+					let res = await request(PERMISSIONS.ANDROID.ACCESS_FINE_LOCATION)
+					if (res !== RESULTS.GRANTED) {
+						console.warn("Syncer.componentDidMount(): Location access was not granted.");
+						this.manager.state().then((state) => this.getBluetoothDev(state));
+					}
+					break;
+				case RESULTS.BLOCKED:
+				case RESULTS.UNAVAILABLE:
+					console.warn("Syncer.componentDidMount(): Location access was not granted.");
+					break;
+				case RESULTS.GRANTED:
+					console.log("Syncer.componentDidMount(): Permissions are given");
+					break;
+					
+			}
+		});
 		this.isMount = true;
 		this.cl_to = setInterval(() => {
 			if (!this.isMount) {
