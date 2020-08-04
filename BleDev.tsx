@@ -76,7 +76,7 @@ class InSyncer {
 		if (this.writing || this.isClosed) {
 			return;
 		}
-		console.log("InSyncer.writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
+		console.debug("InSyncer.writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
 		this.writing = true;
 		// TODO: impelment message sending
 		let buf = new ArrayBuffer(8);

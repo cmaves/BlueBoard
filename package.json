@@ -39,6 +39,6 @@
     "typescript": "~3.9.5"
   },
   "private": true,
-  "name": "BlueBoard",
+  "name": "AirBoard",
   "version": "1.0.0"
 }
