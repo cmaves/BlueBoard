@@ -86,7 +86,11 @@ class InSyncer {
 		dv.setUint32(4, this.msgLength, false);
 		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf) as any);
 		let msg = bytes + this.hash;
-		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => console.warn("Insyncer.writeState(): Failed to write to READ_UUID: ", err));
+		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => 
+		{
+				this.errorState = err;
+				console.warn("Insyncer.writeState(): Failed to write to READ_UUID: ", err)
+		});
 		this.updatePos()
 		this.writing = false;
 	}
@@ -413,6 +417,7 @@ export class BleDev {
 	}
 	disable() {
 		this.enabled = false;
+		clearTimeout(this.conn_to);
 		this.close()
 	}
 
@@ -476,11 +481,13 @@ export class BleDev {
 				this.name = this.device.name;
 			}
 			this.device.onDisconnected((err, dev) => {
+				console.warn("BleDev.connect(): Device has disconnected: ", dev.id);
 				this.device = null;
 				this.close();
 				if (this.enabled) {
 					this.conn_to = setTimeout(() => this.enable(), 5000);
 				}
+				this.uiTrigger(null);
 			});
 		}
 		this.uiTrigger(null);
@@ -498,6 +505,21 @@ export class BleDev {
 		let errorState = undefined;
 		if (this.inSyncer !== null && this.inSyncer.errorState !== null) {
 			errorState = this.inSyncer.errorState;
+		} else if (this.outSyncer !== null && this.outSyncer.errorState !== null) {
+			errorState = this.outSyncer.errorState;
+		}
+		if (errorState !== undefined && this.device !== null) {
+			this.device.isConnected((connected: boolean) => {
+				if (!connected) {
+					console.log("BleDev.getUIElement(): Removing disconnected device:", this.id);
+					this.device = null;
+					this.close();
+					if (this.enabled) {
+						this.conn_to = setTimeout(() => this.enable(), 5000);
+					}
+					this.uiTrigger(null);
+				}
+			});
 		}
 		return (
 			<BleDevView key={this.id} id={this.id} name={this.name} chosen={this.chosen} enabled={this.enabled}
