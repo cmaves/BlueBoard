@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "BlueBoard",
-    "slug": "BlueBoard",
-    "version": "1.0.0",
+    "name": "AirBoard",
+    "slug": "AirBoard",
+    "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {
@@ -18,13 +18,13 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "io.maves.blueboard"
+      "bundleIdentifier": "io.maves.airboard"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "android": {
-      "package": "io.maves.blueboard"
+      "package": "io.maves.airboard"
     },
     "entryPoint": "node_modules/expo/AppEntry.js"
   }

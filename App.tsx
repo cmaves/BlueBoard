@@ -39,6 +39,9 @@ interface PrevDevs {
 interface CurDevs {
 	[key: string]: BleDev;
 }
+interface Blocked {
+	[key: string]: boolean;
+}
 class Syncer extends React.Component<SyncerProps, SyncerState> {
 	prevDevs: PrevDevs | null;
 	devices: CurDevs;
@@ -48,11 +51,12 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	clipSrc: string;
 	clipTime: Date;
 	isMount: boolean;
-	uiUpdate: () => void;
+	uiUpdate: (id: string | null) => void;
 	onUpdateCb: (clip: string, id: string, name: string | null) => void;
 	fc_to: any;
 	cl_to: any;
 	do_to: any;
+	blocked: Blocked;
 	showing_devs: boolean;
 
 	constructor(props: SyncerProps) {
@@ -67,8 +71,9 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.clipState = "";
 		this.clipLocalState = "";
 		this.clipSrc = "";
+		this.blocked = {};
 		this.clipTime = new Date();
-		this.uiUpdate = () => this.updateDevice();
+		this.uiUpdate = (id: string | null) => this.updateDevice(id);
 		this.onUpdateCb = (clip: string, id: string, name: string | null) => {
 			this.onUpdate(clip, id, name);
 		};
@@ -201,7 +206,15 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		let str = JSON.stringify(this.prevDevs);
 		AsyncStorage.setItem(PREV_DEV_STR, str);
 	}
-	updateDevice() {
+	updateDevice(id: string | null) {
+		if (id !== null) {
+			this.blocked[id] = true;
+			if (this.prevDevs !== null) {
+				delete this.prevDevs[id];
+			}
+			this.devices[id].close();
+			delete this.devices[id];
+		}
 		this.manager.state().then((state) => this.update(state));
 		/*
 		let devices = Object.values(this.devices);
@@ -244,7 +257,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 				}
 				let device = devices[0];
 				sbTitle = count + " Active Device";
-				if (count > 1) {
+				if (count !== 1) {
 					sbTitle += "s";
 				}
 				if (device.enabled) {
@@ -278,11 +291,14 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	async tryAddNewDev(dev: Device) {
 		console.log("tryAddNewDev(): ", dev.id);
 		if (this.devices[dev.id] !== undefined) {
-			console.log("tryAddNewDev(): try adding existing devices: ", dev.id)
+			console.log("Syncer.tryAddNewDev(): try adding existing devices: ", dev.id)
 			this.devices[dev.id].connect()
 			return;
 		}
-
+		if (this.blocked[dev.id]) {
+			console.log("Syncer.tryAddNewDev(): Device blocked by previous deletion: ", dev.id);
+			return;
+		}
 		let bleDev = new BleDev(dev.id, dev.name, this.manager, this.uiUpdate, this.onUpdateCb);
 		await bleDev.connect();
 		// recheck this.devices for undefined because of previous await-statement
@@ -345,7 +361,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 				if (enabled) { dev.enable() }
 			});
 		}
-		this.updateDevice();
+		this.updateDevice(null);
 	}
 
 	onUpdate(clip: string, id: string, name: string | null) {
@@ -441,7 +457,8 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 						<Button title={this.state.sbText} onPress={() => {this.sbButtonCb()}}/>
 					</View>
 					<BleDevList style={
-						{height: 0, overflow: "hidden", flex: this.state.list_flex , backgroundColor: "#555555" }} 
+						{height: 0, overflow: "hidden", flex: this.state.list_flex , 
+							backgroundColor: "#555555" }} 
 						children={this.state.devices} />
 				</Animated.View>
 			</View>

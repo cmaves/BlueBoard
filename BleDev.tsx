@@ -1,7 +1,8 @@
 
 
-import React from 'react';
-import { Animated, StyleSheet, Text, View, Image, FlatList, Switch, StyleProp, ViewStyle } from 'react-native';
+import React, { useRef } from 'react';
+import { Pressable, PanResponder, Animated, StyleSheet, Text, View, Image, FlatList, Switch, StyleProp, 
+	ViewStyle } from 'react-native';
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import  base64  from 'react-native-base64';
 import { sha256 } from 'js-sha256';
@@ -375,11 +376,11 @@ export class BleDev {
 	chosen: boolean;
 	inSyncer: InSyncer | null;
 	outSyncer: OutSyncer | null;
-	uiTrigger: () => void;
+	uiTrigger: (id: string | null) => void;
 	device: Device | null;
 	conn_to: any;
 
-	constructor(id: string, name: string | null, manager: BleManager, uiTrigger: () => void,  onUpdate: (clip: string, id: string, name: string | null) => void)
+	constructor(id: string, name: string | null, manager: BleManager, uiTrigger: (id: string | null) => void,  onUpdate: (clip: string, id: string, name: string | null) => void)
  	{
 		this.id = id;
 		this.name = name;
@@ -398,7 +399,7 @@ export class BleDev {
 	async enable() {
 		console.log("BleDev.enable()");
 		this.enabled = true;
-		this.uiTrigger();
+		this.uiTrigger(null);
 		await this.connect();
 		if (this.device === null) {
 			clearTimeout(this.conn_to);
@@ -408,7 +409,7 @@ export class BleDev {
 			this.inSyncer = new InSyncer(this.device, (clip) => this.onUpdate(clip));
 			this.outSyncer = new OutSyncer(this.device);
 		}
-		this.uiTrigger();
+		this.uiTrigger(null);
 	}
 	disable() {
 		this.enabled = false;
@@ -424,7 +425,7 @@ export class BleDev {
 		if (this.outSyncer !== null) {
 			this.outSyncer.close();
 		}
-		this.uiTrigger();
+		this.uiTrigger(null);
 	}
 	onUpdate(clip: string) {
 		this.onUpdateCb(clip, this.id , this.name)
@@ -482,7 +483,7 @@ export class BleDev {
 				}
 			});
 		}
-		this.uiTrigger();
+		this.uiTrigger(null);
 	}
 	switchCb() {
 		console.log("buttonCb(): device: ", this.id);
@@ -494,19 +495,15 @@ export class BleDev {
 	}
 	getUIElement() {
 		console.debug("BleDev.getUIElement(): ", this.id);
-		let opacity;
-		if (this.chosen) {
-			opacity = 1.0
-		} else {
-			opacity = 0.0;
-		}
 		let errorState = undefined;
 		if (this.inSyncer !== null && this.inSyncer.errorState !== null) {
 			errorState = this.inSyncer.errorState;
 		}
 		return (
-			<BleDevView key={this.id} id={this.id} name={this.name} chosenOpacity={opacity} enabled={this.enabled} 
-				callback={() => this.switchCb()} connected={this.device !== null} errorState={errorState} />
+			<BleDevView key={this.id} id={this.id} name={this.name} chosen={this.chosen} enabled={this.enabled}
+				callback={() => this.switchCb()} connected={this.device !== null} errorState={errorState} 
+				delete={() => this.uiTrigger(this.id) }
+				/>
 		);
 	}
 	name_sort(right: BleDev) {
@@ -593,14 +590,15 @@ const styles = StyleSheet.create({
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",
-		height: "100%"
+		height: "100%",
+		width: "100%",
 	},
 	ble_dev_dis: {
 		backgroundColor: "#727272",
 		justifyContent: "space-around",
 		alignItems: "center",
 		flexDirection: "row",
-		height: "100%"
+		width: "100%",
 	},
 	status_icon: {
 		width: 40,
@@ -610,13 +608,14 @@ const styles = StyleSheet.create({
 
 export interface BleDevListProps {
 	children: Array<BleDev>,
-	style?: StyleProp<ViewStyle>
+	style?: any,
 }
 
 interface BleDevProps {
 	callback: () => void,
+	delete: () => void,
 	name: string | null
-	chosenOpacity: number;
+	chosen: boolean;
 	enabled: boolean;
 	id: string;
 	connected: boolean;
@@ -635,17 +634,69 @@ export function BleDevView(props: BleDevProps) {
 	} else {
 		errorOc = 1.0;
 	}
-	return (<View style={style}>
-				<Image source={require("./assets/star.png")}  style={{height: "70%", resizeMode: "center", 
-					opacity: props.chosenOpacity}}/>
-			    <View>
+	const pan = useRef(new Animated.Value(0)).current;
+	const panResponder = useRef(
+		PanResponder.create({
+			onStartShouldSetPanResponder: (evt, gesture) => true,
+			onPanResponderGrant: (evt, gesture) => {
+				pan.extractOffset();
+			},
+			onPanResponderMove: Animated.event([
+					null,
+					{ dx: pan }], {useNativeDriver: false}),
+			onPanResponderRelease: (evt, gesture) => {
+				pan.flattenOffset();
+				pan.stopAnimation((value) => {
+					let target;
+					if (value > 60) {
+						target = 120;
+					} else {
+						target = 0;
+					}
+					Animated.spring(pan, 
+						{toValue: target, velocity: gesture.vx, useNativeDriver: false}
+					).start();
+				});
+			}
+		})
+	).current;
+	return (<>
+			<View style={
+				{height: "100%", width: "100%", justifyContent: "center", backgroundColor: "#F44336", 
+					position: "absolute" }} >
+				<Pressable onPress={props.delete} style={({pressed}) => {
+					return {
+						height: "90%", 
+						aspectRatio: 1, 
+						borderRadius: 60, 
+						alignItems: "center",
+						justifyContent: "center",
+						left: "5%",
+						backgroundColor: pressed ? "#00000055": "#00000000", 
+						opacity: pressed ? 1.0 : 0.8
+					}
+				}}>
+					<Image source={require("./assets/delete.png")} style={{height: "80%", aspectRatio: 1}} />
+				</Pressable>
+			</View>
+			<Animated.View style={[style, {transform: [{translateX: pan.interpolate({
+					inputRange: [0, 1],
+					outputRange: [0, 1],
+					extrapolateLeft: "clamp"
+				})}]}]}
+				{...panResponder.panHandlers}
+				>
+				<Image source={require("./assets/star.png")}  style={
+					{height: "70%", resizeMode: "center", opacity: props.chosen ? 1.0 : 0.0 }}/>
+		   		 <View>
 					<Text style={{color: "#ffffff", fontSize: 15 }} >{props.name}</Text>
 					<Text style={{color: "#b0bec5"}} >{props.id}</Text>
 				</View>
-				<Image source={require("./assets/warning.png")} style={{height: "70%", resizeMode: "center", 
-					opacity: errorOc}}/>
+				<Image source={require("./assets/warning.png")} style={
+					{height: "70%", resizeMode: "center", opacity: errorOc}}/>
 				<Switch value={props.enabled} onValueChange={props.callback}/>
-			</View>)
+			</Animated.View>
+			</>)
 }
 export function BleDevList(props: BleDevListProps) {
 	return (

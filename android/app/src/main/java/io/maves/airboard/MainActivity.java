@@ -1,4 +1,4 @@
-package io.maves.blueboard;
+package io.maves.airboard;
 
 import android.os.Bundle;
 

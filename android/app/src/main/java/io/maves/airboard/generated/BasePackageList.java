@@ -1,4 +1,4 @@
-package io.maves.blueboard.generated;
+package io.maves.airboard.generated;
 
 import java.util.Arrays;
 import java.util.List;
