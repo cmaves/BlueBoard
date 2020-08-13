@@ -44,6 +44,9 @@ class InSyncer {
 		// this.write_to = setTimeout(() => this.writeState(), 1000);
 	}
 	try_init() {
+		if (this.isClosed) {
+			return;
+		}
 		console.log("Insyncer.try_init()");
 		this.device.discoverAllServicesAndCharacteristics().then((device) => {
 			this.device = device;
@@ -224,6 +227,9 @@ class OutSyncer {
 		this.push("");
 	}
 	try_init() {
+		if (this.isClosed) {
+			return;
+		}
 		// this initial read is needed to determine if we are reading properly
 		this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID).then((character) => {
 			this.handleChar(character);
@@ -446,8 +452,9 @@ export class BleDev {
 			}
 		});
 		if (this.device === null || !(await this.device.isConnected())) {
-			this.device = await this.manager.connectToDevice(this.id, { refreshGatt: "OnConnected" }).catch((error) => {
-				console.log("BleDev.connect(): Failed to connected to ", this.id, ": ", error);
+			this.device = await this.manager.connectToDevice(this.id, { refreshGatt: "OnConnected" }).catch((err) => {
+				const j_str = JSON.stringify(err);
+				console.log("BleDev.connect(): Failed to connected to ", this.id, ": ", j_str);
 				return null;
 			});
 		}
@@ -507,19 +514,6 @@ export class BleDev {
 			errorState = this.inSyncer.errorState;
 		} else if (this.outSyncer !== null && this.outSyncer.errorState !== null) {
 			errorState = this.outSyncer.errorState;
-		}
-		if (errorState !== undefined && this.device !== null) {
-			this.device.isConnected((connected: boolean) => {
-				if (!connected) {
-					console.log("BleDev.getUIElement(): Removing disconnected device:", this.id);
-					this.device = null;
-					this.close();
-					if (this.enabled) {
-						this.conn_to = setTimeout(() => this.enable(), 5000);
-					}
-					this.uiTrigger(null);
-				}
-			});
 		}
 		return (
 			<BleDevView key={this.id} id={this.id} name={this.name} chosen={this.chosen} enabled={this.enabled}
@@ -621,6 +615,7 @@ const styles = StyleSheet.create({
 		alignItems: "center",
 		flexDirection: "row",
 		width: "100%",
+		height: "100%"
 	},
 	status_icon: {
 		width: 40,
