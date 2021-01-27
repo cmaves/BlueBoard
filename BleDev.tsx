@@ -4,19 +4,72 @@ import React, { useRef } from 'react';
 import { Pressable, PanResponder, Animated, StyleSheet, Text, View, Image, FlatList, Switch, StyleProp, 
 	ViewStyle } from 'react-native';
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
-import  base64  from 'react-native-base64';
+import  { decode as atob, encode as btoa }from 'base-64';
 import { sha256 } from 'js-sha256';
+// import UTF8 from 'utf-8';
 
 
-
+const U32_MAX = 0xFFFFFFFF;
 export const COPY_UUID  = "4981333e-2d59-43b2-8dc3-8fedee1472c5";
 const READ_UUID  = "07178017-1879-451b-9bb5-3ff13bb85b70";
 const WRITE_UUID = "07178017-1879-451b-9bb5-3ff13bb85b71";
 
+const VER_UUID = "b05778f1-5a88-46a3-b6c8-2d154d629910";
+
+function decode_base64(b64: string) {
+    let string = atob(b64); 
+    let buf = new ArrayBuffer(string.length);
+    let bv = new Uint8Array(buf);
+    for (let i = 0; i < string.length; i++) {
+        bv[i] = string.charCodeAt(i);
+    }
+    return buf;
+}
+function encode_base64(data: ArrayBuffer | Uint8Array) {
+    let bytes: Uint8Array;
+    if (data instanceof ArrayBuffer) {
+        bytes = new Uint8Array(data);
+    } else {
+        bytes = data;
+    }
+    let bs = String.fromCharCode.apply(null, bytes as any);
+    let b64 = btoa(bs);
+    return b64
+
+}
+
+export class Clip {
+    data: ArrayBuffer;
+    mime: string
+    constructor(data: ArrayBuffer, mime: string) {
+        this.data = data;
+        this.mime = mime;
+    }
+    eq(other: Clip) {
+        if (this === other) {
+            return true;
+        }
+        if (this.mime !== other.mime) {
+            return false;
+        }
+        if (this.data.byteLength !== other.data.byteLength) {
+            return false;
+        }
+        let t_view = new Uint8Array(this.data);
+        let o_view = new Uint8Array(other.data);
+        for (let i = 0; i < t_view.length; i++) {
+            if (t_view[i] !== o_view[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
 class InSyncer {
 	hash: string;
-	msg: string;
-	msgLength: number;
+	msg: ArrayBuffer;
+    recvd: number;
+    mime: string;
 	subscription: Subscription | null;
 	writing: boolean;
 	reading: boolean;
@@ -24,15 +77,16 @@ class InSyncer {
 	update_to: any;
 	manualReading: boolean;
 	errorState: string | null;
-	onUpdate: (clip: string) => void;
+	onUpdate: (clip: Clip) => void;
 	isClosed: boolean;
 	firstReadComplete: boolean;
-	constructor(device: Device, onUpdate: (clip: string) => void) {
+	constructor(device: Device, onUpdate: (clip: Clip) => void) {
 		this.onUpdate = onUpdate;
 		this.device = device;
-		this.msg = "";
+		this.msg = new ArrayBuffer(0);
+        this.recvd = 0;
+        this.mime = "";
 		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg))
-		this.msgLength = 0;
 		this.manualReading = false;
 		this.writing = false;
 		this.reading = false;
@@ -55,7 +109,6 @@ class InSyncer {
 				this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, (err,character) => {
 					this.handleIndication(err, character);
 				});
-				this.writeState();
 			}, (error) => {
 				let err_str = JSON.stringify(error);
 				console.warn("Insyncer.tryInit(): Failed to read charactersitic: ", err_str);
@@ -76,20 +129,23 @@ class InSyncer {
 		}
 		clearTimeout(this.update_to);
 	}
-	async writeState() {
+	async writeState(include_hash: boolean) {
 		if (this.writing || this.isClosed) {
 			return;
 		}
-		console.debug("InSyncer.writeState(): cur_pos: ", this.msg.length, ", msg_length: ", this.msgLength);
+		console.debug("InSyncer.writeState(): cur_pos: ", this.recvd, ", msg_length: ", this.msg.byteLength);
 		this.writing = true;
 		// TODO: impelment message sending
-		let buf = new ArrayBuffer(8);
+		let buf = new ArrayBuffer(4);
 		let dv = new DataView(buf);
-		dv.setUint32(0, this.msg.length, false)
-		dv.setUint32(4, this.msgLength, false);
+		dv.setUint32(0, this.recvd, false)
+		// dv.setUint32(4, this.msg.byteLength, false);
 		let bytes = String.fromCharCode.apply(null, new Uint8Array(buf) as any);
-		let msg = bytes + this.hash;
-		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, base64.encode(msg)).catch((err) => 
+		let msg = bytes;
+        if (include_hash) {
+            msg += this.hash;
+        }
+		await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, READ_UUID, btoa(msg)).catch((err) => 
 		{
 				this.errorState = err;
 				console.warn("Insyncer.writeState(): Failed to write to READ_UUID: ", err)
@@ -98,13 +154,12 @@ class InSyncer {
 		this.writing = false;
 	}
 	
-
 	/*
 	 	Setups up a timeout for reading a 
 	 */
 	updatePos() {
 		clearTimeout(this.update_to);
-		if (this.msgLength > this.msg.length) {
+		if (this.msg.byteLength > this.recvd) {
 			this.update_to = setTimeout(() => {
 				this.manualReading = true;
 				this.readChar()
@@ -116,7 +171,7 @@ class InSyncer {
 		}
 	}
 	async readChar() {
-		if (this.isClosed) {
+		if (this.isClosed || this.reading) {
 			return;
 		}
 		this.reading = true;
@@ -131,23 +186,24 @@ class InSyncer {
 			// retry read in a second 
 			console.log("InSyncer.readChar(): failed to readChar: ", error);
 			this.errorState = error;
+			// this probably is nit need because write should work: this.update_to = setTimeout(() => this.readChar(), 1000);
 			this.update_to = setTimeout(() => this.readChar(), 1000);
-			this.writeState();
+			//this.writeState(false);
 		}
 		this.reading = false;
 		
 	}
 	handleChar(character: Characteristic) {
 		this.errorState = null;
-		let data = base64.decode(character.value);
-		if (data.length < 8) {
+		let data = atob(character.value as string);
+		if (data.length < 4) {
 			console.log("Insyncer.handleChar(): too short of message was received");
-			this.writeState();
+			this.writeState(false);
 			return;
 		}
 		let buf = new ArrayBuffer(8);
 		let dv = new DataView(buf);
-		for (let i = 0; i < 8; i++) {
+		for (let i = 0; i < 4; i++) {
 			let code = data.charCodeAt(i);
 			if (code > 255) {
 				throw "Decoded data has character over 255";
@@ -155,37 +211,49 @@ class InSyncer {
 			dv.setUint8(i, code);
 		}
 		let off = dv.getUint32(0, false);
-		let len = dv.getUint32(4, false);
-		console.debug("InSyncer.handleChar(): off: ", off, ", len: ", len);
+		console.debug("InSyncer.handleChar(): off: ", off);
 		if (off === 0xFFFFFFFF) {
-			let hash_slice: string = data.slice(8, 40);
-			if (this.msgLength !== len || this.hash !== hash_slice) {
-				console.log("InSyncer.handleChar(): Receiving new hash");
-				this.msgLength = len;
-				this.hash = hash_slice;
-				this.msg = "";
-			}
+            console.log("Insyncer.handleChar(): Starting new message");
+            if (data.length < 40) {
+			    console.log("Insyncer.handleChar(): too short of new message init was received");
+            }
+			let hash_slice: string = data.slice(4, 36);
+            for (let i = 36; i < 40; i++) {
+                let code = data.charCodeAt(i);
+                if (code > 255) {
+                    throw "Decoded data has character over 255.";
+                }
+                dv.setUint8(i - 32, code);
+            }
+            let len = dv.getUint32(4, false);
+			this.msg = new ArrayBuffer(len);
+            this.recvd = 0;
+			this.hash = hash_slice;
+            this.mime = data.slice(40);
+            this.writeState(true);
 		} else {
-			if (off <= this.msg.length) {
-				let diff = this.msg.length - off;
-				if (len === (data.length - 8 - diff)) {
-					this.msg += data.slice(8 + diff * 2);
-				} else {
-				}
-				if (this.msgLength === this.msg.length) {
-					this.manualReading = false; // we are done reading so stop the rapid reads.
-					if (this.msgLength !== off) {
+			if (off <= this.recvd) {
+				let diff = this.recvd - off;
+                let bv = new Uint8Array(this.msg);
+                // Append data
+                let end = this.recvd + data.length - 4 - diff;
+                for (let i = this.recvd; i < end; i++) {
+                    bv[i] = data.charCodeAt(i + 4);
+                }
+                this.recvd = end;
+				if (this.msg.byteLength === this.recvd) {
+					if (this.msg.byteLength !== off) {
 						// only update the value once, not on periodic updates from readChar().
 						if (this.firstReadComplete) {
-							this.onUpdate(this.msg);
+                            this.onUpdate(new Clip(this.msg, this.mime));
 						} else {
 							this.firstReadComplete = true;
 						}
 					}
 				}
 			}
+		    this.writeState(false);
 		}
-		this.writeState();
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {
 		console.debug("InSyncer.handleIndication()");
@@ -202,7 +270,7 @@ class InSyncer {
 }
 class OutSyncer {
 	hash: string;
-	msg: string;
+	msg: Uint8Array;
 	recvd: number;
 	written: number;
 	device: Device;
@@ -215,7 +283,7 @@ class OutSyncer {
 		
 	constructor(device: Device) {
 		this.device = device;
-		this.msg = "";
+		this.msg = new Uint8Array(0);
 		this.hash = "";
 		this.recvd = 0xFFFFFFFF;
 		this.written = 0;
@@ -224,7 +292,7 @@ class OutSyncer {
 		this.errorState = null;
 		this.subscription = null;
 		this.writing = false;
-		this.push("");
+        this.push(new Clip(new ArrayBuffer(0), ""));
 	}
 	try_init() {
 		if (this.isClosed) {
@@ -253,8 +321,8 @@ class OutSyncer {
 			this.subscription = null;
 		}
 	}
-	push(clip: string) {
-		this.msg = clip;
+	push(clip: Clip) {
+		this.msg = new Uint8Array(clip.data);
 		this.recvd = 0xFFFFFFFF;
 		this.written = 0;
 		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg));
@@ -273,7 +341,7 @@ class OutSyncer {
 			dv.setUint32(0, 0xFFFFFFFF, false);
 			dv.setUint32(4, this.msg.length, false);
 			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.hash;
-			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, base64.encode(msg)).catch((error) =>	
+			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, btoa(msg)).catch((error) =>	
 					console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
 			this.written = 0;
 			this.startUpdateTo();
@@ -293,7 +361,7 @@ class OutSyncer {
 			let len = end - this.written;
 			dv.setUint32(4, len, false);
 			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.msg.slice(this.written, end);
-			await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, base64.encode(msg)).catch((error) => console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
+			await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, btoa(msg)).catch((error) => console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
 			this.written = end;
 		}
 		if (this.recvd !== this.msg.length) {
@@ -323,7 +391,7 @@ class OutSyncer {
 		}
 	}
 	handleChar(character: Characteristic) {
-		let data = base64.decode(character.value);
+        let data = atob(character.value as string);
 		if (data.length < 40) {
 			console.warn("OutSyncer.handleChar(): received message that was too short.");	
 		}
@@ -380,7 +448,7 @@ export class BleDev {
 	id: string;
 	enabled: boolean;
 	manager: BleManager;
-	onUpdateCb: (clip: string, id: string, name: string | null) => void;
+	onUpdateCb: (clip: Clip, id: string, name: string | null) => void;
 	bad: number;
 	name: string | null;
 	chosen: boolean;
@@ -390,7 +458,9 @@ export class BleDev {
 	device: Device | null;
 	conn_to: any;
 
-	constructor(id: string, name: string | null, manager: BleManager, uiTrigger: (id: string | null) => void,  onUpdate: (clip: string, id: string, name: string | null) => void)
+	constructor(id: string, name: string | null, manager: BleManager, 
+        uiTrigger: (id: string | null) => void,  
+        onUpdate: (clip: Clip, id: string, name: string | null) => void)
  	{
 		this.id = id;
 		this.name = name;
@@ -416,8 +486,8 @@ export class BleDev {
 			this.conn_to = setTimeout(() => this.enable(), 5000);
 		} else {
 			// above if check to device is still enabled after await
-			this.inSyncer = new InSyncer(this.device, (clip) => this.onUpdate(clip));
-			this.outSyncer = new OutSyncer(this.device);
+			this.inSyncer = new InSyncer(this.device, (clip: Clip) => this.onUpdateCb(clip, this.id, this.name));
+			// this.outSyncer = new OutSyncer(this.device);
 		}
 		this.uiTrigger(null);
 	}
@@ -437,9 +507,6 @@ export class BleDev {
 			this.outSyncer.close();
 		}
 		this.uiTrigger(null);
-	}
-	onUpdate(clip: string) {
-		this.onUpdateCb(clip, this.id , this.name)
 	}
 	// Connect to and validates the device.
 	async connect()  {
@@ -471,6 +538,19 @@ export class BleDev {
 				return null;
 			});
 		}
+        // Check the version number
+        if (this.device !== null) {
+            await this.device.readDescriptorForService(COPY_UUID, READ_UUID, VER_UUID).then((desc) => {
+                let value = atob(desc.value as string);
+                if  (value.charCodeAt(0) !== 1 || value.charCodeAt(1) < 0) {
+				    console.log("BleDev.connect(): version mismatch with ", this.id);
+                    this.device = null;
+                }
+            }, (error) => {
+				console.log("BleDev.connect(): Failed to retrieve reader version descriptor", this.id, ": ", error);
+                this.device = null;
+            });
+        }
 		if (this.device !== null && this.device.mtu < 512) {
 			let dev = await this.device.requestMTU(512).catch(() => {
 				console.log("BleDev.connect(): Failed to request MTU of 512 for ", this.id);
@@ -568,7 +648,7 @@ export class BleDev {
 			}
 		}
 	}
-	push(clip: string) {
+	push(clip: Clip) {
 		if (this.outSyncer !== null) {
 			this.outSyncer.push(clip);
 		}
