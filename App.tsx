@@ -10,6 +10,7 @@ import  AsyncStorage  from '@react-native-async-storage/async-storage';
 import { BleDevList, BleDev, COPY_UUID, Clip } from './BleDev';
 import {check, request, PERMISSIONS, RESULTS} from 'react-native-permissions';
 import { TextDecoder, TextEncoder } from "@sinonjs/text-encoding";
+import { Clipboard as Clip2 } from "react-native-clipboard-listener";
 const PREV_DEV_STR = "prevDevs";
 const UNSYNCED_STR = "Clipboard has not been updated yet...";
 const UTF8_MIME = 'text/plain;charset=utf-8';
@@ -241,6 +242,12 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.update(await this.manager.state());
 		}
 	}
+    async fetchClip2() {
+        let clipManager = new Clip2(['text/plain']);
+        let clip = await clipManager.getNextClip();
+        console.log("fetchClip2(): clip: ", clip)
+        clipManager.close();
+    }
 	async writebackPrevDevs(id: string, name: string | null, enabled: true) {
 		if (this.prevDevs === null) {
 			console.warn("addToPrevConnection(): this.prevDevs was null");
