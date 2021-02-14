@@ -1,19 +1,24 @@
 // @flow
 // import { StatusBar } from 'expo-status-bar';
 import React from 'react';
-import { Animated, Platform, StatusBar, ScrollView, Button, StyleSheet, Text, View, Image, Switch, Pressable } from 'react-native';
-import Clipboard from "@react-native-community/clipboard";
+import { AppState, Animated, Platform, StatusBar, ScrollView, Button, StyleSheet, Text, View, Image, Switch, Pressable } from 'react-native';
+//import Clipboard from "@react-native-community/clipboard";
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
 import AndroidOpenSettings from 'react-native-android-open-settings'
 import { ImageSourcePropType } from 'react-native';
 import  AsyncStorage  from '@react-native-async-storage/async-storage';
-import { BleDevList, BleDev, COPY_UUID, Clip } from './BleDev';
+import { BleDevList, BleDev, COPY_UUID, encode_base64 } from './BleDev';
 import {check, request, PERMISSIONS, RESULTS} from 'react-native-permissions';
 import { TextDecoder, TextEncoder } from "@sinonjs/text-encoding";
-import { Clipboard as Clip2 } from "react-native-clipboard-listener";
+//import { multiply, ClipData, CbListener } from "react-native-full-clipboard";
+import { multiply, CbListener, Clip, setClipboard } from "react-native-full-clipboard";
 const PREV_DEV_STR = "prevDevs";
 const UNSYNCED_STR = "Clipboard has not been updated yet...";
+
 const UTF8_MIME = 'text/plain;charset=utf-8';
+const JPEG_MIME = 'image/jpeg';
+const PNG_MIME = 'image/png';
+const SUPPORTED_MIMES = [UTF8_MIME, JPEG_MIME, PNG_MIME];
 
 interface SyncerState {
 	sbTitle: string;
@@ -55,29 +60,30 @@ interface ClipViewProps {
 function ClipView(props: ClipViewProps)  {
     let decoder: TextDecoder;
     let s: string;
+    // return (<Image style={{width: "90%", height: "90%", resizeMode: "center" }} source={require("./assets/israel.jpg")}/>)
     switch (props.mime) {
         case 'text/plain':
         case 'text/plain;charset=utf-8':
             decoder = new TextDecoder("utf-8");
             s = decoder.decode(props.data);
-            return (<Text style={{ paddingLeft: 20 }}>
-                {s}
-            </Text>)
+            return (<Text>{s}</Text>)
         case 'text/plain;charset=utf-16le':
             decoder = new TextDecoder("utf-16le");
             s = decoder.decode(props.data);
-            return (<Text style={{ paddingLeft: 20 }}>
-                {s}
-            </Text>)
+            return (<Text>{s}</Text>)
         case 'text/plain;charset=utf-16be':
             decoder = new TextDecoder("utf-16be");
             s = decoder.decode(props.data);
-            return (<Text style={{ paddingLeft: 20 }}>
-                {s}
-            </Text>)
+            return (<Text>{s}</Text>)
+        case 'image/jpeg':
+        case 'image/png':
+            s = 'data:' + props.mime + ';base64,' + encode_base64(props.data);
+            return (<Image style={{width: "90%", height: "90%", resizeMode: "center" }} source={{uri: s}} />)
+            //return (<Image style={{width: 50, height: 50, resizeMode: "center" }} source={{uri: s}} />)
         default:
-            return (<Text style={{ paddingLeft: 20 }}>
-                Cannont process text with mime!: {props.mime}
+            return (<Text>
+                Clipboard has MIME that cannot be rendered.!: {props.mime}
+                It won't be rendered but it will be synced.
             </Text>)
                 
             
@@ -93,6 +99,9 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	prevDevs: PrevDevs | null;
 	devices: CurDevs;
 	manager: BleManager;
+
+    // Clipboard data
+    clipListener: CbListener | null;
 	clipLocalState: Clip;
 	clipState: Clip;
 	clipSrc: string;
@@ -100,8 +109,8 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	isMount: boolean;
 	uiUpdate: (id: string | null) => void;
 	onUpdateCb: (clip: Clip, id: string, name: string | null) => void;
-	fc_to: any;
-	cl_to: any;
+    fetchClipOnChange: (nextState: string) => void;
+	cl_to: any; // Updates the time since clipboard update
 	do_to: any;
 	blocked: Blocked;
 	showing_devs: boolean;
@@ -116,6 +125,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.manager = new BleManager();
 		// this.bleEnabled = false;
         let encoder = new TextEncoder();
+        this.clipListener = null;
 		this.clipState = new Clip(encoder.encode(UNSYNCED_STR), UTF8_MIME);
 		this.clipLocalState = this.clipState;
 		this.clipSrc = "";
@@ -125,6 +135,12 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		this.onUpdateCb = (clip: Clip, id: string, name: string | null) => {
 			this.onUpdate(clip, id, name);
 		};
+        this.fetchClipOnChange = (nextState: string) => {
+            if (nextState !== "active") {
+                return;
+            }
+            this.fetchClip();
+        };
 		this.state = { 
 			clipState: this.clipState, 
 			clipTimeStr: "",
@@ -139,7 +155,8 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			list_flex: new Animated.Value(7),
 			dev_sec_flex: new Animated.Value(8),
 		};
-		this.fc_to = setInterval(() => this.fetchClip(), 2000);
+		// this.fc_to = setInterval(() => this.fetchClip(), 2000);
+        //this.fetchClip();
 		this.manager.state().then((state) => this.getBluetoothDev(state));
 	}
 	componentDidMount() {
@@ -164,6 +181,9 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			}
 		});
 		this.isMount = true;
+        this.clipListener = new CbListener(SUPPORTED_MIMES);
+        this.fetchClip();
+        AppState.addEventListener("change", this.fetchClipOnChange);
 		this.cl_to = setInterval(() => {
 			if (!this.isMount) {
 				return;
@@ -174,9 +194,15 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		}, 1000);
 
 	}
+    /*
+*/
 	componentWillUnmount() {
 		console.log("Syncer.componentWillUnmount()");
 		this.isMount = false;
+        if (this.clipListener !== null) {
+            this.clipListener.close();
+            this.clipListener = null;
+        }
 		// clearTimeout(this.fc_to);
 		clearTimeout(this.cl_to);
 		clearTimeout(this.do_to);
@@ -211,16 +237,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			return elapsed + " seconds ago";
 		}
 	}
-	/*
-	componentDidMount() {
-	}
-	componentWillUnmount() {
-		if (this.fc_to !== null) {
-			clearTimeout(this.fc_to);
-		}
-	}
-	*/
-	async fetchClip() {
+	/*async fetchClip2() {
 		let text: Clip;
         let encoder = new TextEncoder();
 		try {
@@ -241,12 +258,55 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			}
 			this.update(await this.manager.state());
 		}
-	}
-    async fetchClip2() {
-        let clipManager = new Clip2(['text/plain']);
-        let clip = await clipManager.getNextClip();
-        console.log("fetchClip2(): clip: ", clip)
-        clipManager.close();
+	}*/
+    async fetchClip() {
+        if (this.clipListener === null) {
+            return;
+        }
+        let clip: Clip;
+        try {
+            clip = await this.clipListener.getCurClip();
+            console.log("Syncer.fetchClip2(): clip: ", clip)
+        } catch(error) {
+			console.error("App.fetchClip(): Failed to read from clipboard: ", error);
+            return;
+            let err_str = "Error reading clipboard: " + error;
+            let encoder = new TextEncoder();
+            clip = new Clip(encoder.encode(err_str), UTF8_MIME);
+        }
+        if (!clip.eq(this.clipLocalState) && !clip.eq(this.clipState)) {
+			this.clipState = clip;
+			this.clipLocalState = clip;
+			this.clipSrc = "Your device";
+			for (let id in this.devices) {
+				this.devices[id].push(this.clipState);
+			}
+			this.update(await this.manager.state());
+        }
+    }
+    async listenForClip() {
+        if (this.clipListener === null) {
+            return;
+        }
+        let clip = await this.clipListener.getNextClip().catch((err: any) => {
+            console.log("Syncer.listenForClip(): Failed to get listener: ", err);
+            return null;
+        });
+        if (clip !== null) {
+            console.log("Syncer.listenForClip(): clip received: ", clip.mime);
+            if (!clip.eq(this.clipLocalState) && !clip.eq(this.clipState)) {
+    			this.clipState = clip;
+    			this.clipLocalState = clip;
+    			this.clipSrc = "Your device";
+    			for (let id in this.devices) {
+    				this.devices[id].push(this.clipState);
+    			}
+    			this.update(await this.manager.state());
+           }
+        }
+        if (this.clipListener !== null) {
+            this.listenForClip();
+        }
     }
 	async writebackPrevDevs(id: string, name: string | null, enabled: true) {
 		if (this.prevDevs === null) {
@@ -273,23 +333,10 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			delete this.devices[id];
 		}
 		this.manager.state().then((state) => this.update(state));
-		/*
-		let devices = Object.values(this.devices);
-		devices.sort((left: BleDev, right: BleDev) => left.cmp(right));
-		let state = Object.assign(this.state);
-		state.devices = devices;
-		let count = 0;
-		for (let dev of devices) {
-			if (dev.device !== null && dev.enabled) {
-				count += 1;
-			}
-		}
-		this.sbTitle = count 
-		this.setState(state);
-		*/
 	}
 	update(bleState: State) {
-		console.debug("update(): devices: ", this.devices);
+		//console.debug("update(): devices: ", this.devices);
+        console.debug("App.update()");
 		if (!this.isMount) {
 			return;
 		}
@@ -414,15 +461,20 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			} else {
 				dev = this.devices[id];
 			}
-			dev.connect().then(() => {
-				if (enabled) { dev.enable() }
-			});
+            if (enabled) {
+                dev.enable();
+            } else {
+                dev.connect()
+            }
 		}
 		this.updateDevice(null);
 	}
 
 	onUpdate(clip: Clip, id: string, name: string | null) {
         console.log("App.onUpdate(): New clip received with mime: " + clip.mime);
+        if (clip.eq(this.clipState)) {
+            return;
+        }
 		this.clipState = clip;
 		if (name === null) {
 			this.clipSrc = id;
@@ -431,27 +483,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		}
 		this.clipTime = new Date();
         let decoder: TextDecoder;
-        let s: string | null = null;
-        switch (clip.mime) {
-            case 'text/plain':
-            case 'text/plain;charset=utf-8':
-                decoder = new TextDecoder('utf-8');
-                s = decoder.decode(clip.data);
-                break;
-            case 'text/plain;charset=utf-16le':
-                decoder = new TextDecoder('utf-16le');
-                s = decoder.decode(clip.data);
-                break;
-            case 'text/plain;charset=utf-16be':
-                decoder = new TextDecoder('utf-16be');
-                s = decoder.decode(clip.data);
-                break;
-            default:
-                console.log("App.onUpdate(): mime not supported for clipboard.");
-        }
-        if (typeof s === 'string') {
-		    Clipboard.setString(s);
-        }
+        setClipboard(this.clipState)
 		for (let idI in this.devices) {
 			if (idI !== id) {
 				this.devices[idI].push(this.clipState);
@@ -515,7 +547,10 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 					<Text style={{ color: "#b0bec5", paddingLeft: 25}}>Synced {this.state.clipTimeStr}</Text>
 				</View>
 				<Animated.View style={{ backgroundColor: "#E0E0E0", flex: this.state.clip_flex }}>
-                    <ScrollView><ClipView {...this.state.clipState}/></ScrollView>
+                    <ScrollView contentContainerStyle={
+                        {height: "100%", alignItems: "center", paddingLeft: 20, paddingRight: 20}} >
+                        <ClipView {...this.state.clipState}/>
+                    </ScrollView>
 					<Pressable onPress={() => this.dropdown()} style={({pressed}) => { 
 						let op = pressed ? 1.0 : 0.8;
 						let bc = pressed ? "#3f51b522" : "#3f51b500";

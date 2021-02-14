@@ -4,6 +4,7 @@ import React, { useRef } from 'react';
 import { Pressable, PanResponder, Animated, StyleSheet, Text, View, Image, FlatList, Switch, StyleProp, 
 	ViewStyle } from 'react-native';
 import { BleManager, BleError, State, Device, Characteristic, Service, Subscription } from 'react-native-ble-plx';
+import { Clip } from 'react-native-full-clipboard';
 import  { decode as atob, encode as btoa }from 'base-64';
 import { sha256 } from 'js-sha256';
 // import UTF8 from 'utf-8';
@@ -25,19 +26,29 @@ function decode_base64(b64: string) {
     }
     return buf;
 }
-function encode_base64(data: ArrayBuffer | Uint8Array) {
+function buffer_to_bs(data: ArrayBuffer | Uint8Array): string {
     let bytes: Uint8Array;
     if (data instanceof ArrayBuffer) {
         bytes = new Uint8Array(data);
     } else {
         bytes = data;
     }
-    let bs = String.fromCharCode.apply(null, bytes as any);
+    if (bytes.length > 32768) {
+        let split = Math.floor(bytes.length / 2);
+        let left = buffer_to_bs(bytes.subarray(0, split))
+        let right = buffer_to_bs(bytes.subarray(split));
+        return left + right;
+    }
+    // let bs = bytes.reduce((data: string, b: number) => data + String.fromCharCode(b), "");
+    return String.fromCharCode.apply(null, bytes as any);
+}
+export function encode_base64(data: ArrayBuffer | Uint8Array): string {
+    let bs = buffer_to_bs(data);
     let b64 = btoa(bs);
     return b64
 
 }
-
+/*
 export class Clip {
     data: ArrayBuffer;
     mime: string
@@ -65,6 +76,7 @@ export class Clip {
         return true;
     }
 }
+*/
 class InSyncer {
 	hash: string;
 	msg: ArrayBuffer;
@@ -84,7 +96,10 @@ class InSyncer {
 		this.onUpdate = onUpdate;
 		this.device = device;
 		this.msg = new ArrayBuffer(0);
-        this.recvd = 0;
+        /* By setting the first characteristic to -1, we guarentee that the client will request a 
+           position update after the characteristic read unless the read is a MSG_START message (pos -1).
+         */
+        this.recvd = -1; // by setting recvd to negative we guarentee the first characteristic 
         this.mime = "";
 		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg))
 		this.manualReading = false;
@@ -129,6 +144,8 @@ class InSyncer {
 		}
 		clearTimeout(this.update_to);
 	}
+    // This method writes to the server our current state.
+    // Through updatePos() it also stores creates a timeout to manual read the next method.
 	async writeState(include_hash: boolean) {
 		if (this.writing || this.isClosed) {
 			return;
@@ -155,7 +172,7 @@ class InSyncer {
 	}
 	
 	/*
-	 	Setups up a timeout for reading a 
+	 	Setups up a timeout for reading the characteristic
 	 */
 	updatePos() {
 		clearTimeout(this.update_to);
@@ -175,23 +192,22 @@ class InSyncer {
 			return;
 		}
 		this.reading = true;
-		console.debug("InSyncer.readChar()");
+		console.debug("InSyncer.readChar(): this.manualReading: ", this.manualReading);
 		try {
-			let character = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID)
+			let character = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID);
 			this.handleChar(character);
-			if (this.manualReading) {
-				this.readChar();
-			}
 		} catch (error) {
 			// retry read in a second 
-			console.log("InSyncer.readChar(): failed to readChar: ", error);
+			console.log("InSyncer.readChar(): failed to readChar: ", JSON.stringify(error));
 			this.errorState = error;
 			// this probably is nit need because write should work: this.update_to = setTimeout(() => this.readChar(), 1000);
 			this.update_to = setTimeout(() => this.readChar(), 1000);
 			//this.writeState(false);
 		}
 		this.reading = false;
-		
+		if (this.manualReading && this.recvd < this.msg.byteLength) {
+			this.readChar();
+		}	
 	}
 	handleChar(character: Characteristic) {
 		this.errorState = null;
@@ -227,12 +243,32 @@ class InSyncer {
             }
             let len = dv.getUint32(4, false);
 			this.msg = new ArrayBuffer(len);
-            this.recvd = 0;
 			this.hash = hash_slice;
             this.mime = data.slice(40);
+
+            // we want to ignore the first message
+            // By setting the recvd to end of message
+            // we skip the entire transfer.
+            if (this.firstReadComplete) {
+                this.recvd = 0;
+            } else {
+                this.firstReadComplete = true;
+                this.recvd = len; //
+            }
+
+            // if we are still manualReading try to remonitor characteristic 
+            if (this.manualReading) {
+                if (this.subscription !== null) {
+                    this.subscription.remove()
+                }
+				this.subscription = this.device.monitorCharacteristicForService(COPY_UUID, READ_UUID, 
+                    (err,character) => {
+					this.handleIndication(err, character);
+			    });
+            }
             this.writeState(true);
 		} else {
-			if (off <= this.recvd) {
+			if (off <= this.recvd && off <= this.msg.byteLength) {
 				let diff = this.recvd - off;
                 let bv = new Uint8Array(this.msg);
                 // Append data
@@ -244,15 +280,13 @@ class InSyncer {
 				if (this.msg.byteLength === this.recvd) {
 					if (this.msg.byteLength !== off) {
 						// only update the value once, not on periodic updates from readChar().
-						if (this.firstReadComplete) {
-                            this.onUpdate(new Clip(this.msg, this.mime));
-						} else {
-							this.firstReadComplete = true;
-						}
+                        this.onUpdate(new Clip(this.msg, this.mime));
 					}
 				}
-			}
-		    this.writeState(false);
+		        this.writeState(false);
+			} else {
+		        this.writeState(true);
+            }
 		}
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {

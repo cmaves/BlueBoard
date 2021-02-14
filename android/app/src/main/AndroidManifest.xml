@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.maves.airboard">
   <uses-permission android:name="android.permission.READ_INTERNAL_STORAGE"/>
+  <uses-permission android:name="android.permission.READ_USER_DICTIONARY"/>
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
   <uses-permission android:name="android.permission.BLUETOOTH" />
@@ -8,7 +9,7 @@
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
   <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
   <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
-  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="false" android:theme="@style/AppTheme">
+  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="false" android:theme="@style/AppTheme" >
     <meta-data android:name="expo.modules.updates.EXPO_UPDATE_URL" android:value="YOUR-APP-URL-HERE"/>
     <meta-data android:name="expo.modules.updates.EXPO_SDK_VERSION" android:value="38.0.0"/>
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="true"/>
@@ -20,6 +21,9 @@
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
     </activity>
+    <provider android:name="androidx.core.content.FileProvider" android:authorities="com.reactnativefullclipboard.FileProvider" android:exported="false" android:grantUriPermissions="true">
+      <meta-data android:name="android.support.FILE_PROVIDER_PATHS"  android:resource="@xml/file_paths"/>
+    </provider>
     <activity android:name="com.facebook.react.devsupport.DevSettingsActivity"/>
   </application>
 </manifest>
