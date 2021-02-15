@@ -20,6 +20,9 @@ const JPEG_MIME = 'image/jpeg';
 const PNG_MIME = 'image/png';
 const SUPPORTED_MIMES = [UTF8_MIME, JPEG_MIME, PNG_MIME];
 
+function isSupported(mime: string): boolean {
+    return SUPPORTED_MIMES.indexOf(mime) != -1;
+}
 interface SyncerState {
 	sbTitle: string;
 	sbText: string;
@@ -102,7 +105,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 
     // Clipboard data
     clipListener: CbListener | null;
-	clipLocalState: Clip;
+	//clipLocalState: Clip;
 	clipState: Clip;
 	clipSrc: string;
 	clipTime: Date;
@@ -110,6 +113,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 	uiUpdate: (id: string | null) => void;
 	onUpdateCb: (clip: Clip, id: string, name: string | null) => void;
     fetchClipOnChange: (nextState: string) => void;
+    shouldFetch: (msgLength: number, hash: string, mime: string) => boolean;
 	cl_to: any; // Updates the time since clipboard update
 	do_to: any;
 	blocked: Blocked;
@@ -127,7 +131,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
         let encoder = new TextEncoder();
         this.clipListener = null;
 		this.clipState = new Clip(encoder.encode(UNSYNCED_STR), UTF8_MIME);
-		this.clipLocalState = this.clipState;
+		//this.clipLocalState = this.clipState;
 		this.clipSrc = "";
 		this.blocked = {};
 		this.clipTime = new Date();
@@ -140,6 +144,15 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
                 return;
             }
             this.fetchClip();
+        };
+        this.shouldFetch = (msgLength: number, hash: string, mime: string) => {
+            if (!isSupported(mime)) {
+                return false;
+            }
+            if (msgLength != this.clipState.data.byteLength) {
+                return true;
+            }
+            return hash != String.fromCharCode.apply(null, this.clipState.hash)
         };
 		this.state = { 
 			clipState: this.clipState, 
@@ -237,28 +250,6 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			return elapsed + " seconds ago";
 		}
 	}
-	/*async fetchClip2() {
-		let text: Clip;
-        let encoder = new TextEncoder();
-		try {
-            let s = await Clipboard.getString();
-            text = new Clip(encoder.encode(s), UTF8_MIME);
-			console.debug("Syncer.fetchClip(): read from clipboard: " + text.data);
-		} catch(error) {
-			console.error("Failed to read from clipboard");
-            let err_str = "Error reading clipboard: " + error;
-            text = new Clip(encoder.encode(err_str), UTF8_MIME);
-		}
-        if (!text.eq(this.clipLocalState) && !text.eq(this.clipState)) {
-			this.clipState = text;
-			this.clipLocalState = text;
-			this.clipSrc = "Your device";
-			for (let id in this.devices) {
-				this.devices[id].push(this.clipState);
-			}
-			this.update(await this.manager.state());
-		}
-	}*/
     async fetchClip() {
         if (this.clipListener === null) {
             return;
@@ -274,9 +265,9 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
             let encoder = new TextEncoder();
             clip = new Clip(encoder.encode(err_str), UTF8_MIME);
         }
-        if (!clip.eq(this.clipLocalState) && !clip.eq(this.clipState)) {
+        if (/*!clip.eq(this.clipLocalState) && */!clip.eq(this.clipState)) {
 			this.clipState = clip;
-			this.clipLocalState = clip;
+			// this.clipLocalState = clip;
 			this.clipSrc = "Your device";
 			for (let id in this.devices) {
 				this.devices[id].push(this.clipState);
@@ -294,9 +285,9 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
         });
         if (clip !== null) {
             console.log("Syncer.listenForClip(): clip received: ", clip.mime);
-            if (!clip.eq(this.clipLocalState) && !clip.eq(this.clipState)) {
+            if (/*!clip.eq(this.clipLocalState) && */!clip.eq(this.clipState)) {
     			this.clipState = clip;
-    			this.clipLocalState = clip;
+    			//this.clipLocalState = clip;
     			this.clipSrc = "Your device";
     			for (let id in this.devices) {
     				this.devices[id].push(this.clipState);
@@ -403,7 +394,8 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			console.log("Syncer.tryAddNewDev(): Device blocked by previous deletion: ", dev.id);
 			return;
 		}
-		let bleDev = new BleDev(dev.id, dev.name, this.manager, this.uiUpdate, this.onUpdateCb);
+		let bleDev = new BleDev(dev.id, dev.name, this.manager, this.clipState, this.uiUpdate, 
+            this.onUpdateCb, this.shouldFetch);
 		await bleDev.connect();
 		// recheck this.devices for undefined because of previous await-statement
 		if (bleDev.device !== null && this.devices[dev.id] === undefined) {
@@ -456,7 +448,8 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			// TODO: move these to the constructor
 			let dev: BleDev;
 			if (this.devices[id] === undefined) {
-				dev = new BleDev(id, name, this.manager, this.uiUpdate, this.onUpdateCb);
+				dev = new BleDev(id, name, this.manager, this.clipState,
+                    this.uiUpdate, this.onUpdateCb, this.shouldFetch);
 				this.devices[id] = dev;
 			} else {
 				dev = this.devices[id];
@@ -469,7 +462,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 		}
 		this.updateDevice(null);
 	}
-
+    // Handles when a new clip is received from a remote device
 	onUpdate(clip: Clip, id: string, name: string | null) {
         console.log("App.onUpdate(): New clip received with mime: " + clip.mime);
         if (clip.eq(this.clipState)) {

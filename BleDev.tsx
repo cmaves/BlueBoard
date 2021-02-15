@@ -9,6 +9,7 @@ import  { decode as atob, encode as btoa }from 'base-64';
 import { sha256 } from 'js-sha256';
 // import UTF8 from 'utf-8';
 
+const WO_MIN = 64;
 
 const U32_MAX = 0xFFFFFFFF;
 export const COPY_UUID  = "4981333e-2d59-43b2-8dc3-8fedee1472c5";
@@ -90,10 +91,15 @@ class InSyncer {
 	manualReading: boolean;
 	errorState: string | null;
 	onUpdate: (clip: Clip) => void;
+    shouldFetch: (msgLength: number, hash: string, mime: string) => boolean;
 	isClosed: boolean;
 	firstReadComplete: boolean;
-	constructor(device: Device, onUpdate: (clip: Clip) => void) {
+	constructor(device: Device, 
+        onUpdate: (clip: Clip) => void,
+        shouldFetch: (msgLength: number, hash: string, mime: string) => boolean
+    ){
 		this.onUpdate = onUpdate;
+        this.shouldFetch = shouldFetch;
 		this.device = device;
 		this.msg = new ArrayBuffer(0);
         /* By setting the first characteristic to -1, we guarentee that the client will request a 
@@ -195,7 +201,7 @@ class InSyncer {
 		console.debug("InSyncer.readChar(): this.manualReading: ", this.manualReading);
 		try {
 			let character = await this.device.readCharacteristicForService(COPY_UUID, READ_UUID);
-			this.handleChar(character);
+			await this.handleChar(character);
 		} catch (error) {
 			// retry read in a second 
 			console.log("InSyncer.readChar(): failed to readChar: ", JSON.stringify(error));
@@ -209,12 +215,12 @@ class InSyncer {
 			this.readChar();
 		}	
 	}
-	handleChar(character: Characteristic) {
+	async handleChar(character: Characteristic) {
 		this.errorState = null;
 		let data = atob(character.value as string);
 		if (data.length < 4) {
 			console.log("Insyncer.handleChar(): too short of message was received");
-			this.writeState(false);
+			await this.writeState(false);
 			return;
 		}
 		let buf = new ArrayBuffer(8);
@@ -228,7 +234,7 @@ class InSyncer {
 		}
 		let off = dv.getUint32(0, false);
 		console.debug("InSyncer.handleChar(): off: ", off);
-		if (off === 0xFFFFFFFF) {
+		if (off === U32_MAX) {
             console.log("Insyncer.handleChar(): Starting new message");
             if (data.length < 40) {
 			    console.log("Insyncer.handleChar(): too short of new message init was received");
@@ -249,11 +255,14 @@ class InSyncer {
             // we want to ignore the first message
             // By setting the recvd to end of message
             // we skip the entire transfer.
-            if (this.firstReadComplete) {
+            if (!this.firstReadComplete) {
+                this.firstReadComplete = true;
+                this.recvd = len;
+            } else if (this.shouldFetch(this.msg.byteLength, this.hash, this.mime)) {
                 this.recvd = 0;
             } else {
-                this.firstReadComplete = true;
-                this.recvd = len; //
+                // we also what to skip the if shouldFetch is false
+                this.recvd = len;
             }
 
             // if we are still manualReading try to remonitor characteristic 
@@ -266,36 +275,44 @@ class InSyncer {
 					this.handleIndication(err, character);
 			    });
             }
-            this.writeState(true);
+            await this.writeState(true);
 		} else {
 			if (off <= this.recvd && off <= this.msg.byteLength) {
 				let diff = this.recvd - off;
                 let bv = new Uint8Array(this.msg);
                 // Append data
-                let end = this.recvd + data.length - 4 - diff;
-                for (let i = this.recvd; i < end; i++) {
-                    bv[i] = data.charCodeAt(i + 4);
+                let recvd_off = this.recvd  - diff - 4;
+                for (let i = 4 + diff; i < data.length; i++) {
+                    // map the bv bytes to the incoming data bytes with recvd_off(set)
+                    bv[i + recvd_off] = data.charCodeAt(i);
                 }
-                this.recvd = end;
+                this.recvd = data.length + recvd_off; // same mapping as above
 				if (this.msg.byteLength === this.recvd) {
 					if (this.msg.byteLength !== off) {
 						// only update the value once, not on periodic updates from readChar().
-                        this.onUpdate(new Clip(this.msg, this.mime));
+                        let newClip = new Clip(this.msg, this.mime);
+                        let newHash = String.fromCharCode.apply(null, newClip.hash);
+                        if (newHash === this.hash) {
+                            this.onUpdate(newClip);
+                        } else {
+                            console.log("InSyncer.handleChar(): Bad hash resetting to beginning");
+                            this.recvd = -1;
+                        }
 					}
 				}
-		        this.writeState(false);
+		        await this.writeState(false);
 			} else {
-		        this.writeState(true);
+		        await this.writeState(true);
             }
 		}
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {
-		console.debug("InSyncer.handleIndication()");
 		if (err !== null) {
 			let j_err = JSON.stringify(err);
 			console.log("InSyncer.handleIndication(): Failed to monitior Read characteristic of ", this.device.id, ": ", j_err);
 			return;
 		}
+		console.debug("InSyncer.handleIndication()");
 		if (character === null) { return };
 		this.manualReading = false;
 		clearTimeout(this.update_to);
@@ -305,8 +322,10 @@ class InSyncer {
 class OutSyncer {
 	hash: string;
 	msg: Uint8Array;
+    mime: string;
 	recvd: number;
 	written: number;
+    wo_max: number;
 	device: Device;
 	subscription: Subscription | null;
 	manualReading: boolean;
@@ -315,18 +334,20 @@ class OutSyncer {
 	writing: boolean;
 	isClosed: boolean;
 		
-	constructor(device: Device) {
+	constructor(device: Device, clip: Clip) {
 		this.device = device;
 		this.msg = new Uint8Array(0);
 		this.hash = "";
-		this.recvd = 0xFFFFFFFF;
+        this.mime = "";
+		this.recvd = U32_MAX;
 		this.written = 0;
 		this.manualReading = false;
 		this.isClosed = false;
 		this.errorState = null;
 		this.subscription = null;
 		this.writing = false;
-        this.push(new Clip(new ArrayBuffer(0), ""));
+        this.wo_max = WO_MIN;
+        this.push(clip);
 	}
 	try_init() {
 		if (this.isClosed) {
@@ -357,9 +378,10 @@ class OutSyncer {
 	}
 	push(clip: Clip) {
 		this.msg = new Uint8Array(clip.data);
-		this.recvd = 0xFFFFFFFF;
+        this.mime = clip.mime;
+		this.recvd = U32_MAX;
 		this.written = 0;
-		this.hash = String.fromCharCode.apply(null, sha256.array(this.msg));
+		this.hash = String.fromCharCode.apply(null, clip.hash);
 		this.writeNext();
 		
 	}
@@ -369,12 +391,13 @@ class OutSyncer {
 		}
 		this.writing = true;
 		console.debug("OutSyncer.writeNext(): this.recvd:", this.recvd, ", this.written: ", this.written, "/", this.msg.length);
-		let buf = new ArrayBuffer(8);
+		let buf = new ArrayBuffer(4);
 		let dv = new DataView(buf);
-		if (this.recvd === 0xFFFFFFFF) {
-			dv.setUint32(0, 0xFFFFFFFF, false);
-			dv.setUint32(4, this.msg.length, false);
-			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.hash;
+		if (this.recvd === U32_MAX) {
+			dv.setUint32(0, U32_MAX, false);
+            let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.hash;
+			dv.setUint32(0, this.msg.length, false);
+            msg += String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.mime;
 			this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, btoa(msg)).catch((error) =>	
 					console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
 			this.written = 0;
@@ -382,26 +405,26 @@ class OutSyncer {
 			this.writing = false;
 			return;	
 		}
-		let target;
-		const MAX_OUT = this.device.mtu * 8;
-		if (this.device.mtu !== null) {
-			target = Math.min(this.msg.length, (this.recvd + MAX_OUT));
-		} else {
-			target = Math.min(this.msg.length, 244 * 8);
-		}
+        const MAX_OUT = this.wo_max * 8;
+	    let target = Math.min(this.msg.length, (this.recvd + MAX_OUT));
 		while (this.written < target) {
-			let end = Math.min(target, (this.written + 512 - 8));
+			let end = Math.min(target, (this.written + this.wo_max - 4));
 			dv.setUint32(0, this.written, false);
 			let len = end - this.written;
-			dv.setUint32(4, len, false);
-			let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any) + this.msg.slice(this.written, end);
-			await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, btoa(msg)).catch((error) => console.warn("OutSyncer.writeNext(): Failed to write to device: ", error));
-			this.written = end;
+            let msg = String.fromCharCode.apply(null, new Uint8Array(buf) as any);
+            let a = msg.charCodeAt(0);
+            msg += String.fromCharCode.apply(null, this.msg.subarray(this.written, end) as any);
+            try {
+			    await this.device.writeCharacteristicWithoutResponseForService(COPY_UUID, WRITE_UUID, 
+                    btoa(msg));
+			    this.written = end;
+            } catch (error) {
+                console.warn("OutSyncer.writeNext(): Failed to write to device: ", error);
+                break;
+            }
 		}
 		if (this.recvd !== this.msg.length) {
 			this.startUpdateTo();
-		} else {
-			this.manualReading = false;
 		}
 		this.writing = false;
 	}
@@ -412,42 +435,46 @@ class OutSyncer {
 		console.debug("OutSyncer.readUpdate()");
 		try {
 			let character = await this.device.readCharacteristicForService(COPY_UUID, WRITE_UUID);
-			this.handleChar(character);
-			if (this.manualReading) {
-				this.readUpdate();
-			}
+			await this.handleChar(character);
 		} catch (error) {
 			// retry read in a second 
 			console.log("OutSyncer.readUpdate(): failed to read: ", error);
 			this.update_to = setTimeout(() => this.readUpdate(), 1000);
 			this.errorState = error;
-
+            return;
 		}
+	    if (this.manualReading && this.recvd < this.msg.length) {
+			this.readUpdate();
+        }
 	}
-	handleChar(character: Characteristic) {
+	async handleChar(character: Characteristic) {
         let data = atob(character.value as string);
-		if (data.length < 40) {
+		if (data.length < 4) {
 			console.warn("OutSyncer.handleChar(): received message that was too short.");	
 		}
-		let buf = new ArrayBuffer(8);
-		let dv = new DataView(buf);
-		for (let i = 0; i < 8; i++) {
-			dv.setUint8(i, data.charCodeAt(i));
-		}
-		let curPos = dv.getUint32(0, false);
-		let msgLength = dv.getUint32(4, false);
-		if (msgLength != this.msg.length || data.slice(8, 40) != this.hash) {
-			this.written = 0;
-			this.recvd = 0xFFFFFFFF;
-			this.writeNext();
-			return;
-		}
-		if (curPos <= this.recvd) {
-			// duplicate ACK was received
-			this.written = curPos;
-		}
-		this.recvd = curPos;
-		this.writeNext();
+		let buf = new ArrayBuffer(4);
+        let dv = new DataView(buf);
+        for (let i = 0; i < 4; i++) {
+            dv.setUint8(i, data.charCodeAt(i));
+        }
+        let off = dv.getUint32(0, false);
+        let hash = null;
+        if (data.length >= 36) {
+            hash = data.slice(4, 36);
+        }
+        if (this.recvd === U32_MAX) {
+            if (off <= this.msg.length && hash !== null && hash === this.hash) {
+                this.recvd = off;
+            }
+        } else if (hash !== null && hash !== this.hash) {
+            this.recvd = U32_MAX;
+        } else if (off <= this.recvd) {
+	        // duplicate ACK was received
+		    this.written = off;
+		} else {
+            this.recvd = off;
+        }
+		await this.writeNext();
 	}
 	handleIndication(err: BleError | null, character: Characteristic | null) {
 		console.debug("OutSyncer.handleIndication()");
@@ -469,6 +496,8 @@ class OutSyncer {
 	}
 
 }
+
+
 async function deviceHasCopy(device: Device) {
 	try {
 		let services = await device.services();
@@ -483,24 +512,28 @@ export class BleDev {
 	enabled: boolean;
 	manager: BleManager;
 	onUpdateCb: (clip: Clip, id: string, name: string | null) => void;
+    shouldFetch: (msgLength: number, hash: string, mime: string) => boolean;
 	bad: number;
 	name: string | null;
 	chosen: boolean;
 	inSyncer: InSyncer | null;
 	outSyncer: OutSyncer | null;
+    clip: Clip
 	uiTrigger: (id: string | null) => void;
 	device: Device | null;
 	conn_to: any;
 
-	constructor(id: string, name: string | null, manager: BleManager, 
+	constructor(id: string, name: string | null, manager: BleManager, clip: Clip,
         uiTrigger: (id: string | null) => void,  
-        onUpdate: (clip: Clip, id: string, name: string | null) => void)
- 	{
+        onUpdate: (clip: Clip, id: string, name: string | null) => void,
+        shouldFetch: (msgLength: number, hash: string, mime: string) => boolean
+    ){
 		this.id = id;
 		this.name = name;
 		this.manager = manager;
 		this.uiTrigger = uiTrigger;
 		this.onUpdateCb = onUpdate;
+        this.shouldFetch = shouldFetch;
 		console.log("Constructing BleDev for: ", this.id);
 		this.enabled = false;
 		this.bad = 0;
@@ -508,6 +541,7 @@ export class BleDev {
 		this.device = null;
 		this.inSyncer = null;
 		this.outSyncer = null;
+        this.clip = clip;
 		// this.state.style = styles.ble_dev;
 	}
 	async enable() {
@@ -520,8 +554,9 @@ export class BleDev {
 			this.conn_to = setTimeout(() => this.enable(), 5000);
 		} else {
 			// above if check to device is still enabled after await
-			this.inSyncer = new InSyncer(this.device, (clip: Clip) => this.onUpdateCb(clip, this.id, this.name));
-			// this.outSyncer = new OutSyncer(this.device);
+			/*this.inSyncer = new InSyncer(this.device, 
+                (clip: Clip) => this.onUpdateCb(clip, this.id, this.name), this.shouldFetch);*/
+			this.outSyncer = new OutSyncer(this.device, this.clip);
 		}
 		this.uiTrigger(null);
 	}
@@ -683,6 +718,7 @@ export class BleDev {
 		}
 	}
 	push(clip: Clip) {
+        this.clip = clip;
 		if (this.outSyncer !== null) {
 			this.outSyncer.push(clip);
 		}
