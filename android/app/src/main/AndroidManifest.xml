@@ -1,6 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.maves.airboard">
   <uses-permission android:name="android.permission.READ_INTERNAL_STORAGE"/>
-  <uses-permission android:name="android.permission.READ_USER_DICTIONARY"/>
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
   <uses-permission android:name="android.permission.BLUETOOTH" />
