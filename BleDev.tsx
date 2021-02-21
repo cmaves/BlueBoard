@@ -554,8 +554,8 @@ export class BleDev {
 			this.conn_to = setTimeout(() => this.enable(), 5000);
 		} else {
 			// above if check to device is still enabled after await
-			/*this.inSyncer = new InSyncer(this.device, 
-                (clip: Clip) => this.onUpdateCb(clip, this.id, this.name), this.shouldFetch);*/
+			this.inSyncer = new InSyncer(this.device, 
+                (clip: Clip) => this.onUpdateCb(clip, this.id, this.name), this.shouldFetch);
 			this.outSyncer = new OutSyncer(this.device, this.clip);
 		}
 		this.uiTrigger(null);
@@ -588,7 +588,8 @@ export class BleDev {
 			}
 		});
 		if (this.device === null || !(await this.device.isConnected())) {
-			this.device = await this.manager.connectToDevice(this.id, { refreshGatt: "OnConnected" }).catch((err) => {
+            // add { refreshGatt: "OnConnected" } for refreshing handles on connect
+			this.device = await this.manager.connectToDevice(this.id).catch((err) => {
 				const j_str = JSON.stringify(err);
 				console.log("BleDev.connect(): Failed to connected to ", this.id, ": ", j_str);
 				return null;

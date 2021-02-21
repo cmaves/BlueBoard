@@ -140,10 +140,11 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
 			this.onUpdate(clip, id, name);
 		};
         this.fetchClipOnChange = (nextState: string) => {
+            console.debug("Syncer.fetchClipOnChange(): ", nextState)
             if (nextState !== "active") {
                 return;
             }
-            this.fetchClip();
+            setTimeout(() => this.fetchClip(), 500);
         };
         this.shouldFetch = (msgLength: number, hash: string, mime: string) => {
             if (!isSupported(mime)) {
@@ -478,9 +479,7 @@ class Syncer extends React.Component<SyncerProps, SyncerState> {
         let decoder: TextDecoder;
         setClipboard(this.clipState)
 		for (let idI in this.devices) {
-			if (idI !== id) {
-				this.devices[idI].push(this.clipState);
-			}
+		    this.devices[idI].push(this.clipState);
 		}
 		this.update(State.PoweredOn);
 	}

@@ -7034,8 +7034,10 @@ react-native-ble-plx@^2.0.0:
   resolved "https://registry.yarnpkg.com/react-native-ble-plx/-/react-native-ble-plx-2.0.2.tgz#0912c50d4d807ed279a2a1043362c96318518154"
   integrity sha512-NjUl5H7bMgNfMma6i+W+wCsfQjOrUxSnLdmYgb8LSas4UZmmsakhEVK4C9/qHm2oxKB+SLR87zD6upZfD/R3sw==
 
-"react-native-full-clipboard@file:../react-native-full-clipboard":
-  version "0.1.0"
+react-native-full-clipboard@0.1.1:
+  version "0.1.1"
+  resolved "https://registry.yarnpkg.com/react-native-full-clipboard/-/react-native-full-clipboard-0.1.1.tgz#8ca348d31984a18b3722e745ff65b0e26ae17fd0"
+  integrity sha512-Z2c0gvD3PWc1taSrsGcbetgmu6SP9rM3KN0e60OiZnajsl9yGtwZcEn8oHtWZ2I+Fp4W1rXORCJEskjGAKr4zw==
   dependencies:
     js-sha256 "^0.9.0"
 
